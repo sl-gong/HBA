@@ -21,7 +21,7 @@ double get_current_time() {
 #define WIN_SIZE 10
 #define GAP 5
 #define AVG_THR
-#define FULL_HESS
+// #define FULL_HESS  // 注释掉，减少内存占用
 // #define ENABLE_RVIZ
 // #define ENABLE_FILTER
 
@@ -632,7 +632,7 @@ public:
     double u = 0.01, v = 2;
     Eigen::MatrixXd D(jac_leng, jac_leng), Hess(jac_leng, jac_leng),
                     HessuD(jac_leng, jac_leng);
-    Eigen::VectorXd JacT(jac_leng), dxi(jac_leng), new_dxi(jac_leng);
+    Eigen::VectorXd JacT(jac_leng), dxi(jac_leng);
 
     D.setIdentity();
     double residual1, residual2, q;
@@ -663,33 +663,36 @@ public:
       double tm = get_current_time();
       D.diagonal() = Hess.diagonal();
       HessuD = Hess + u*D;
-      double t1 = get_current_time();
+      
+      // 优化：使用SparseMatrix直接构造，避免临时的tripletlist
       Eigen::SparseMatrix<double> A1_sparse(jac_leng, jac_leng);
       std::vector<Eigen::Triplet<double>> tripletlist;
+      
+      // 预分配内存，减少动态扩展
+      tripletlist.reserve(HessuD.nonZeros());
+      
       for(int a = 0; a < jac_leng; a++)
         for(int b = 0; b < jac_leng; b++)
           if(HessuD(a, b) != 0)
           {
             tripletlist.push_back(Eigen::Triplet<double>(a, b, HessuD(a, b)));
-            //A1_sparse.insert(a, b) = HessuD(a, b);
           }
+      
       A1_sparse.setFromTriplets(tripletlist.begin(), tripletlist.end());
       A1_sparse.makeCompressed();
+      
+      // 清除不再需要的临时变量
+      tripletlist.clear();
+      
       Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> Solver_sparse;
       Solver_sparse.compute(A1_sparse);
       size_t temp_mem = check_mem();
       if(temp_mem > max_mem) max_mem = temp_mem;
+      
       dxi = Solver_sparse.solve(-JacT);
       temp_mem = check_mem();
       if(temp_mem > max_mem) max_mem = temp_mem;
       solvtime += get_current_time() - tm;
-      // new_dxi = Solver_sparse.solve(-JacT);
-      // printf("new solve time cost %f\n",get_current_time() - t1);
-      // relative_err = ((Hess + u*D)*dxi + JacT).norm()/JacT.norm();
-      // absolute_err = ((Hess + u*D)*dxi + JacT).norm();
-      // std::cout<<"relative error "<<relative_err<<std::endl;
-      // std::cout<<"absolute error "<<absolute_err<<std::endl;
-      // std::cout<<"delta x\n"<<(new_dxi-dxi).transpose()/dxi.norm()<<std::endl;
 
       x_stats_temp = x_stats;
       for(int j = 0; j < win_size; j++)
@@ -707,12 +710,7 @@ public:
       #endif
       residual = residual2;
       q = (residual1-residual2);
-      // printf("iter%d: (%lf %lf) u: %lf v: %lf q: %lf %lf %lf\n",
-      //        i, residual1, residual2, u, v, q/q1, q1, q);
       loop_num = i+1;
-      // if(hesstime/loop_num > 1) printf("Avg. Hessian time: %lf ", hesstime/loop_num);
-      // if(solvtime/loop_num > 1) printf("Avg. solve time: %lf\n", solvtime/loop_num);
-      // if(double(max_mem/1048576.0) > 2.0) printf("Max mem: %lf\n", double(max_mem/1048576.0));
       
       if(q > 0)
       {
@@ -729,6 +727,12 @@ public:
         v = 2 * v;
         is_calc_hess = false;
       }
+      
+      // 清除当前迭代中不再需要的变量
+      if(is_calc_hess) {
+        HessuD.setZero();
+      }
+      
       #ifdef AVG_THR
       if((fabs(residual1-residual2)/residual1) < 0.05 || i == 9)
       {
@@ -742,6 +746,11 @@ public:
       if(fabs(residual1-residual2)<1e-9) break;
       #endif
     }
+    
+    // 函数结束前清除所有临时变量
+    Hess.setZero();
+    JacT.setZero();
+    D.setZero();
   }
 
   size_t check_mem()

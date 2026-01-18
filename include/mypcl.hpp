@@ -74,6 +74,8 @@ namespace mypcl
   {
     size_t size = pc_in.points.size();
     pt_out.points.resize(size);
+    pt_out.width = size;
+    pt_out.height = 1;
     for(size_t i = 0; i < size; i++)
     {
       Eigen::Vector3d pt_cur(pc_in.points[i].x, pc_in.points[i].y, pc_in.points[i].z);

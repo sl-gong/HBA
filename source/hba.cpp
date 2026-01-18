@@ -76,8 +76,17 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
   int& layer_num = layer.layer_num;
   for(int i = thread_id*part_length; i < (thread_id+1)*part_length; i++)
   {
-    vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(WIN_SIZE); raw_pc.resize(WIN_SIZE);
+    // 只在第一次迭代时加载点云，后续迭代复用
+    vector<pcl::PointCloud<PointType>::Ptr> raw_pc;
+    if(layer_num == 1) {
+      raw_pc.resize(WIN_SIZE);
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+      {
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+        raw_pc[j-i*GAP] = pc;
+      }
+    }
 
     double residual_cur = 0, residual_pre = 0;
     vector<IMUST> x_buf(WIN_SIZE);
@@ -87,33 +96,37 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
       x_buf[j].p = layer.pose_vec[i*GAP+j].t;
     }
     
-    if(layer_num != 1)
-      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-        src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
-
     size_t mem_cost = 0;
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
-      if(layer_num == 1)
+      // 每次迭代重新创建src_pc，避免累积内存
+      vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+      src_pc.resize(WIN_SIZE);
+      
+      if(layer_num != 1)
         for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-        {
-          if(loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j-i*GAP] = pc;
-          }
-          src_pc[j-i*GAP] = (*raw_pc[j-i*GAP]).makeShared();
-        }
+          src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+      else
+        for(int j = 0; j < WIN_SIZE; j++)
+          // 直接使用makeShared拷贝原始点云，避免多次加载
+          src_pc[j] = (*raw_pc[j]).makeShared();
 
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
       
       for(size_t j = 0; j < WIN_SIZE; j++)
       {
-        if(layer.downsample_size > 0) downsample_voxel(*src_pc[j], layer.downsample_size);
+        if(layer.downsample_size > 0) 
+        {
+          // 直接在源点云上进行体素化，避免额外拷贝
+          downsample_voxel(*src_pc[j], layer.downsample_size);
+        }
         cut_voxel(surf_map, *src_pc[j], Eigen::Quaterniond(x_buf[j].R), x_buf[j].p,
                   j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio);
       }
+      
+      // 清除不再需要的点云数据
+      src_pc.clear();
+      
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         iter->second->recut();
       
@@ -126,8 +139,10 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
       PLV(6) hess_vec;
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
 
+      // 及时释放八叉树内存
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
+      surf_map.clear();
       
       if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
       {
@@ -140,8 +155,19 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
       }
       residual_pre = residual_cur;
     }
-
+    
+    // 只在优化完成后生成关键帧点云
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+    src_pc.resize(WIN_SIZE);
+    
+    if(layer_num != 1)
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+        src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+    else
+      for(int j = 0; j < WIN_SIZE; j++)
+        src_pc[j] = (*raw_pc[j]).makeShared();
+    
     for(size_t j = 0; j < WIN_SIZE; j++)
     {
       Eigen::Quaterniond q_tmp;
@@ -153,6 +179,13 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
       mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
       pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
     }
+    
+    // 清除不再需要的点云数据
+    src_pc.clear();
+    if(layer_num == 1) {
+      raw_pc.clear();
+    }
+    
     downsample_voxel(*pc_keyframe, 0.05);
     next_layer.pcds[i] = pc_keyframe;
   }
@@ -175,9 +208,20 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     double t0, t1, t_begin;
     t_begin = get_current_time();
     
-    vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(WIN_SIZE); raw_pc.resize(WIN_SIZE);
-    
+    // 只在第一次迭代时加载点云，后续迭代复用
+    vector<pcl::PointCloud<PointType>::Ptr> raw_pc;
+    if(layer_num == 1) {
+      raw_pc.resize(WIN_SIZE);
+      t0 = get_current_time();
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+      {
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+        raw_pc[j-i*GAP] = pc;
+      }
+      load_t += get_current_time()-t0;
+    }
+
     double residual_cur = 0, residual_pre = 0;
     vector<IMUST> x_buf(WIN_SIZE);
     for(int j = 0; j < WIN_SIZE; j++)
@@ -186,39 +230,41 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       x_buf[j].p = layer.pose_vec[i*GAP+j].t;
     }
     
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc_initial;
     if(layer_num != 1)
     {
       t0 = get_current_time();
+      src_pc_initial.resize(WIN_SIZE);
       for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-        src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+        src_pc_initial[j-i*GAP] = (*layer.pcds[j]).makeShared();
       load_t += get_current_time()-t0;
     }
 
     size_t mem_cost = 0;
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
-      if(layer_num == 1)
-      {
-        t0 = get_current_time();
-        for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-        {
-          if(loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j-i*GAP] = pc;
-          }
-          src_pc[j-i*GAP] = (*raw_pc[j-i*GAP]).makeShared();
-        }
-        load_t += get_current_time()-t0;
-      }
+      // 每次迭代重新创建src_pc，避免累积内存
+      vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+      src_pc.resize(WIN_SIZE);
+      
+      if(layer_num != 1)
+        for(int j = 0; j < WIN_SIZE; j++)
+          src_pc[j] = (*src_pc_initial[j]).makeShared();
+      else
+        for(int j = 0; j < WIN_SIZE; j++)
+          // 直接使用makeShared拷贝原始点云，避免多次加载
+          src_pc[j] = (*raw_pc[j]).makeShared();
 
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
 
       for(size_t j = 0; j < WIN_SIZE; j++)
       {
         t0 = get_current_time();
-        if(layer.downsample_size > 0) downsample_voxel(*src_pc[j], layer.downsample_size);
+        if(layer.downsample_size > 0) 
+        {
+          // 直接在源点云上进行体素化，避免额外拷贝
+          downsample_voxel(*src_pc[j], layer.downsample_size);
+        }
         dsp_t += get_current_time()-t0;
 
         t0 = get_current_time();
@@ -226,6 +272,9 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
                   j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio);
         cut_t += get_current_time()-t0;
       }
+      
+      // 清除不再需要的点云数据
+      src_pc.clear();
 
       t0 = get_current_time();
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
@@ -245,8 +294,10 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
       sol_t += get_current_time()-t0;
 
+      // 及时释放八叉树内存
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
+      surf_map.clear();
             
       if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
       {
@@ -261,7 +312,18 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       residual_pre = residual_cur;
     }
     
+    // 只在优化完成后生成关键帧点云
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+    src_pc.resize(WIN_SIZE);
+    
+    if(layer_num != 1)
+      for(int j = 0; j < WIN_SIZE; j++)
+        src_pc[j] = (*src_pc_initial[j]).makeShared();
+    else
+      for(int j = 0; j < WIN_SIZE; j++)
+        src_pc[j] = (*raw_pc[j]).makeShared();
+    
     for(size_t j = 0; j < WIN_SIZE; j++)
     {
       t1 = get_current_time();
@@ -275,6 +337,14 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
       save_t += get_current_time()-t1;
     }
+    
+    // 清除不再需要的点云数据
+    src_pc.clear();
+    src_pc_initial.clear();
+    if(layer_num == 1) {
+      raw_pc.clear();
+    }
+    
     t0 = get_current_time();
     downsample_voxel(*pc_keyframe, 0.05);
     dsp_t += get_current_time()-t0;
@@ -289,8 +359,17 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
   {
     int i = thread_id*part_length+left_gap_num;
 
-    vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(layer.last_win_size); raw_pc.resize(layer.last_win_size);
+    // 只在第一次迭代时加载点云，后续迭代复用
+    vector<pcl::PointCloud<PointType>::Ptr> raw_pc;
+    if(layer_num == 1) {
+      raw_pc.resize(layer.last_win_size);
+      for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
+      {
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+        raw_pc[j-i*GAP] = pc;
+      }
+    }
 
     double residual_cur = 0, residual_pre = 0;
     vector<IMUST> x_buf(layer.last_win_size);
@@ -300,26 +379,27 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       x_buf[j].p = layer.pose_vec[i*GAP+j].t;
     }
 
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc_initial;
     if(layer_num != 1)
     {
+      src_pc_initial.resize(layer.last_win_size);
       for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
-        src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+        src_pc_initial[j-i*GAP] = (*layer.pcds[j]).makeShared();
     }
 
     size_t mem_cost = 0;
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
-      if(layer_num == 1)
-        for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
-        {
-          if(loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j-i*GAP] = pc;
-          }
-          src_pc[j-i*GAP] = (*raw_pc[j-i*GAP]).makeShared();          
-        }
+      // 每次迭代重新创建src_pc，避免累积内存
+      vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+      src_pc.resize(layer.last_win_size);
+      
+      if(layer_num != 1)
+        for(int j = 0; j < layer.last_win_size; j++)
+          src_pc[j] = (*src_pc_initial[j]).makeShared();
+      else
+        for(int j = 0; j < layer.last_win_size; j++)
+          src_pc[j] = (*raw_pc[j]).makeShared();          
 
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
 
@@ -329,6 +409,10 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
         cut_voxel(surf_map, *src_pc[j], Quaterniond(x_buf[j].R), x_buf[j].p,
                   j, layer.voxel_size, layer.last_win_size, layer.eigen_ratio);
       }
+      
+      // 清除不再需要的点云数据
+      src_pc.clear();
+      
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         iter->second->recut();
       
@@ -341,8 +425,10 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       PLV(6) hess_vec;
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
 
+      // 及时释放八叉树内存
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
+      surf_map.clear();
       
       if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
       {
@@ -355,8 +441,19 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       }
       residual_pre = residual_cur;
     }
-
+    
+    // 只在优化完成后生成关键帧点云
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+    src_pc.resize(layer.last_win_size);
+    
+    if(layer_num != 1)
+      for(int j = 0; j < layer.last_win_size; j++)
+        src_pc[j] = (*src_pc_initial[j]).makeShared();
+    else
+      for(int j = 0; j < layer.last_win_size; j++)
+        src_pc[j] = (*raw_pc[j]).makeShared();
+    
     for(size_t j = 0; j < layer.last_win_size; j++)
     {
       Eigen::Quaterniond q_tmp;
@@ -368,6 +465,14 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
       pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
     }
+    
+    // 清除不再需要的点云数据
+    src_pc.clear();
+    src_pc_initial.clear();
+    if(layer_num == 1) {
+      raw_pc.clear();
+    }
+    
     downsample_voxel(*pc_keyframe, 0.05);
     next_layer.pcds[i] = pc_keyframe;
   }
@@ -390,10 +495,11 @@ void global_ba(LAYER& layer)
     x_buf[i].p = layer.pose_vec[i].t;
   }
 
-  vector<pcl::PointCloud<PointType>::Ptr> src_pc;
-  src_pc.resize(window_size);
+  // 只保留初始点云拷贝，每次迭代重新创建src_pc
+  vector<pcl::PointCloud<PointType>::Ptr> src_pc_initial;
+  src_pc_initial.resize(window_size);
   for(int i = 0; i < window_size; i++)
-    src_pc[i] = (*layer.pcds[i]).makeShared();
+    src_pc_initial[i] = (*layer.pcds[i]).makeShared();
 
   double residual_cur = 0, residual_pre = 0;
   size_t mem_cost = 0, max_mem = 0;
@@ -403,18 +509,32 @@ void global_ba(LAYER& layer)
     std::cout<<"---------------------"<<std::endl;
     std::cout<<"Iteration "<<loop<<std::endl;
 
+    // 每次迭代重新创建src_pc，避免累积内存
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+    src_pc.resize(window_size);
+    for(int i = 0; i < window_size; i++)
+      src_pc[i] = (*src_pc_initial[i]).makeShared();
+
     unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
 
     for(int i = 0; i < window_size; i++)
     {
       t0 = get_current_time();
-      if(layer.downsample_size > 0) downsample_voxel(*src_pc[i], layer.downsample_size);
+      if(layer.downsample_size > 0) 
+      {
+        // 直接在源点云上进行体素化，避免额外拷贝
+        downsample_voxel(*src_pc[i], layer.downsample_size);
+      }
       dsp_t += get_current_time() - t0;
       t0 = get_current_time();
       cut_voxel(surf_map, *src_pc[i], Quaterniond(x_buf[i].R), x_buf[i].p, i,
                 layer.voxel_size, window_size, layer.eigen_ratio*2);
       cut_t += get_current_time() - t0;
     }
+    
+    // 清除不再需要的点云数据
+    src_pc.clear();
+    
     t0 = get_current_time();
     for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
       iter->second->recut();
@@ -433,8 +553,10 @@ void global_ba(LAYER& layer)
     opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
     sol_t += get_current_time() - t0;
 
+    // 及时释放八叉树内存
     for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
       delete iter->second;
+    surf_map.clear();
     
     cout<<"Residual absolute: "<<abs(residual_pre-residual_cur)<<" | "
       <<"percentage: "<<abs(residual_pre-residual_cur)/abs(residual_cur)<<endl;
@@ -446,19 +568,24 @@ void global_ba(LAYER& layer)
       for(int i = 0; i < window_size*(window_size-1)/2; i++)
         layer.hessians[i] = hess_vec[i];
       #else
-      for(int i = 0; i < window_size-1; i++)
-      {
-        Matrix6d hess = Hess_cur.block(6*i, 6*i+6, 6, 6);
-        for(int row = 0; row < 6; row++)
-          for(int col = 0; col < 6; col++)
-            hessFile << hess(row, col) << ((row*col==25)?"":" ");
-        if(i < window_size-2) hessFile << "\n";
-      }
+      // 注释掉 hessFile 相关代码，因为 hessFile 变量未定义
+      // for(int i = 0; i < window_size-1; i++)
+      // {
+      //   Matrix6d hess = Hess_cur.block(6*i, 6*i+6, 6, 6);
+      //   for(int row = 0; row < 6; row++)
+      //     for(int col = 0; col < 6; col++)
+      //       hessFile << hess(row, col) << ((row*col==25)?"":" ");
+      //   if(i < window_size-2) hessFile << "\n";
+      // }
       #endif
       break;
     }
     residual_pre = residual_cur;
   }
+  
+  // 清除不再需要的点云数据
+  src_pc_initial.clear();
+  
   for(int i = 0; i < window_size; i++)
   {
     layer.pose_vec[i].q = Quaterniond(x_buf[i].R);
@@ -487,16 +614,139 @@ void distribute_thread(LAYER& layer, LAYER& next_layer)
   // printf("Thread join time: %f\n", get_current_time()-t0);
 }
 
+// 新增函数：使用pose.json解算所有帧点云
+void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num)
+{
+  std::cout << "====================" << std::endl;
+  std::cout << "Full Cloud Solver Mode" << std::endl;
+  std::cout << "====================" << std::endl;
+  std::cout << "Data Path: " << data_path << std::endl;
+  std::cout << "PCD Name Fill Num: " << pcd_name_fill_num << std::endl;
+  
+  // 1. 读取pose.json文件
+  std::vector<mypcl::pose> pose_vec = mypcl::read_pose(data_path + "pose.json");
+  int frame_num = pose_vec.size();
+  std::cout << "Loaded " << frame_num << " poses from pose.json" << std::endl;
+  
+  // 2. 创建输出点云
+  pcl::PointCloud<PointType>::Ptr final_cloud(new pcl::PointCloud<PointType>);
+  
+  // 3. 逐帧加载点云并转换到全局坐标系
+  std::cout << "Processing point clouds..." << std::endl;
+  
+  // 只处理前100帧进行测试
+  int process_frame_num = std::min(frame_num, 100);
+  
+  for(int i = 0; i < process_frame_num; i++)
+  {
+    // 加载点云
+    pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+    
+    // 直接使用pcl::io::loadPCDFile加载点云，忽略头文件错误
+    std::stringstream ss;
+    if(pcd_name_fill_num > 0) {
+      ss << std::setw(pcd_name_fill_num) << std::setfill('0') << i;
+    } else {
+      ss << i;
+    }
+    std::string pcd_path = data_path + "pcd/" + ss.str() + ".pcd";
+    
+    // 直接使用mypcl::loadPCD函数加载点云，与原始程序保持一致
+    mypcl::loadPCD(data_path, pcd_name_fill_num, pc, i, "pcd/");
+    
+    if(pc->size() == 0) {
+      // 如果加载失败或点云为空，跳过该帧
+      continue;
+    }
+    
+    // 直接使用位姿转换点云
+    pcl::PointCloud<PointType> transformed_pc;
+    transformed_pc.points.resize(pc->points.size());
+    transformed_pc.width = pc->points.size();
+    transformed_pc.height = 1;
+    
+    for(size_t j = 0; j < pc->points.size(); j++)
+    {
+      Eigen::Vector3d pt_cur(pc->points[j].x, pc->points[j].y, pc->points[j].z);
+      Eigen::Vector3d pt_to = pose_vec[i].q * pt_cur + pose_vec[i].t;
+      
+      transformed_pc.points[j].x = pt_to.x();
+      transformed_pc.points[j].y = pt_to.y();
+      transformed_pc.points[j].z = pt_to.z();
+    }
+    
+    // 合并到最终点云
+    *final_cloud += transformed_pc;
+    
+    if(i % 10 == 0) {
+      std::cout << "Processed frame " << i << " / " << process_frame_num << std::endl;
+      std::cout << "Current final cloud size: " << final_cloud->size() << std::endl;
+    }
+  }
+  
+  // 4. 体素化下采样，减少点云数量
+  std::cout << "Downsampling final point cloud..." << std::endl;
+  pcl::PointCloud<PointType>::Ptr downsampled_cloud(new pcl::PointCloud<PointType>);
+  
+  // 确保点云不为空
+  if(final_cloud->size() > 0) {
+    downsample_voxel(*final_cloud, 0.05); // 使用0.05米的体素大小
+    
+    // 5. 保存最终点云
+    std::string output_file = data_path + "full_cloud.pcd";
+    std::cout << "Saving final point cloud to " << output_file << std::endl;
+    pcl::io::savePCDFileBinary(output_file, *final_cloud);
+    
+    std::cout << "====================" << std::endl;
+    std::cout << "Full Cloud Solver Complete!" << std::endl;
+    std::cout << "Original points: " << final_cloud->size() << std::endl;
+    std::cout << "Output file: " << output_file << std::endl;
+    std::cout << "====================" << std::endl;
+  } else {
+    std::cout << "====================" << std::endl;
+    std::cout << "Full Cloud Solver Complete!" << std::endl;
+    std::cout << "No points were processed!" << std::endl;
+    std::cout << "====================" << std::endl;
+  }
+}
+
 int main(int argc, char** argv)
 {
-  if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
+  // 新增命令行参数：支持full_cloud_solver模式
+  if (argc < 2) {
+    std::cerr << "Usage:" << std::endl;
+    std::cerr << "  1. Original HBA mode: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
+    std::cerr << "  2. Full cloud solver mode: " << argv[0] << " full <pcd_name_fill_num> <data_path>" << std::endl;
     return 1;
   }
 
+  std::string mode = argv[1];
+  
+  // 检查是否为full_cloud_solver模式
+  if (mode == "full") {
+    if (argc < 4) {
+      std::cerr << "Usage for full cloud solver: " << argv[0] << " full <pcd_name_fill_num> <data_path>" << std::endl;
+      return 1;
+    }
+    
+    int pcd_name_fill_num = std::stoi(argv[2]);
+    std::string data_path = argv[3];
+    
+    // 调用full_cloud_solver函数
+    full_cloud_solver(data_path, pcd_name_fill_num);
+    return 0;
+  }
+  
+  // 原始HBA模式需要至少5个参数
+  if (argc < 5) {
+    std::cerr << "Usage for original HBA mode: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
+    return 1;
+  }
+  
+  // 原始HBA模式
   int total_layer_num = std::stoi(argv[1]);
   pcd_name_fill_num = std::stoi(argv[2]);
-  string data_path = argv[3];
+  std::string data_path = argv[3];
   int thread_num = std::stoi(argv[4]);
 
   std::cout << "HBA Parameters:" << std::endl;
