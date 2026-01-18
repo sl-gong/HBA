@@ -4,11 +4,10 @@
 #include <thread>
 #include <fstream>
 #include <iomanip>
+#include <chrono>
 #include <Eigen/Sparse>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCholesky>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>

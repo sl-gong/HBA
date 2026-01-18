@@ -4,13 +4,19 @@
 #include <thread>
 #include <fstream>
 #include <iomanip>
+#include <chrono>
 #include <Eigen/Sparse>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCholesky>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
 
 #include "tools.hpp"
+
+// Helper function to get current time in seconds
+double get_current_time() {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration<double>(duration).count();
+}
 
 #define WIN_SIZE 10
 #define GAP 5
@@ -649,15 +655,15 @@ public:
     {
       if(is_calc_hess)
       {
-        double tm = ros::Time::now().toSec();
+        double tm = get_current_time();
         residual1 = divide_thread(x_stats, voxhess, x_ab, Hess, JacT);
-        hesstime += ros::Time::now().toSec() - tm;
+        hesstime += get_current_time() - tm;
       }
 
-      double tm = ros::Time::now().toSec();
+      double tm = get_current_time();
       D.diagonal() = Hess.diagonal();
       HessuD = Hess + u*D;
-      double t1 = ros::Time::now().toSec();
+      double t1 = get_current_time();
       Eigen::SparseMatrix<double> A1_sparse(jac_leng, jac_leng);
       std::vector<Eigen::Triplet<double>> tripletlist;
       for(int a = 0; a < jac_leng; a++)
@@ -676,9 +682,9 @@ public:
       dxi = Solver_sparse.solve(-JacT);
       temp_mem = check_mem();
       if(temp_mem > max_mem) max_mem = temp_mem;
-      solvtime += ros::Time::now().toSec() - tm;
+      solvtime += get_current_time() - tm;
       // new_dxi = Solver_sparse.solve(-JacT);
-      // printf("new solve time cost %f\n",ros::Time::now().toSec() - t1);
+      // printf("new solve time cost %f\n",get_current_time() - t1);
       // relative_err = ((Hess + u*D)*dxi + JacT).norm()/JacT.norm();
       // absolute_err = ((Hess + u*D)*dxi + JacT).norm();
       // std::cout<<"relative error "<<relative_err<<std::endl;

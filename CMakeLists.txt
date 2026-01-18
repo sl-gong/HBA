@@ -11,43 +11,43 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -std=c++0x -std=c++17 -fexceptions")
 SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY ../bin)
 
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  rospy
-  rosbag
-  std_msgs
-  geometry_msgs
-  visualization_msgs
-  tf
-)
+# 全局定义 Eigen 版本常量，确保匹配 GTSAM 使用的 Eigen 3.3.7
+add_definitions(-DEIGEN_WORLD_VERSION=3 -DEIGEN_MAJOR_VERSION=3 -DEIGEN_MINOR_VERSION=7)
 
 find_package(PCL REQUIRED)
-find_package(Eigen3 REQUIRED)
+# 使用 GTSAM 自带的 Eigen 版本
+set(EIGEN3_INCLUDE_DIR /Users/gsl/work/slam/gtsam/gtsam/3rdparty/Eigen)
+include_directories(${EIGEN3_INCLUDE_DIR})
 find_package(GTSAM REQUIRED QUIET)
 
-catkin_package(
-  CATKIN_DEPENDS roscpp rospy std_msgs message_runtime
-)
+# 查找 TBB 库
+find_library(TBB_LIBRARY tbb PATHS /opt/homebrew/lib NO_DEFAULT_PATH)
+find_library(TBB_MALLOC_LIBRARY tbbmalloc PATHS /opt/homebrew/lib NO_DEFAULT_PATH)
+if(TBB_LIBRARY AND TBB_MALLOC_LIBRARY)
+    message("Found TBB libraries: ${TBB_LIBRARY}, ${TBB_MALLOC_LIBRARY}")
+    # 将 TBB 库所在目录添加到链接搜索路径
+    link_directories(/opt/homebrew/lib)
+else()
+    message(FATAL_ERROR "TBB libraries not found")
+endif()
 
 include_directories(
   include
-  ${catkin_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
   ${GTSAM_INCLUDE_DIR}
 )
 
-catkin_package(
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs visualization_msgs tf
-  DEPENDS EIGEN3 PCL
-  INCLUDE_DIRS
-)
-
 # Hierarchical Bundle Adjustment
 add_executable(hba source/hba.cpp)
-target_link_libraries(hba ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtsam)
+# 强制设置 Eigen 版本信息，以匹配 GTSAM 的要求（Eigen 3.3.7）
+target_compile_definitions(hba PRIVATE EIGEN_WORLD_VERSION=3 EIGEN_MAJOR_VERSION=3 EIGEN_MINOR_VERSION=7)
+# 链接 TBB 库
+target_link_libraries(hba ${PCL_LIBRARIES} gtsam /opt/homebrew/lib/libtbb.dylib /opt/homebrew/lib/libtbbmalloc.dylib)
 
-add_executable(visualize_map source/visualize.cpp)
-target_link_libraries(visualize_map ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+# Remove visualize_map since it depends on ROS for visualization
+# add_executable(visualize_map source/visualize.cpp)
+# target_link_libraries(visualize_map ${PCL_LIBRARIES})
 
-add_executable(calculate_MME source/calculate_MME.cpp)
-target_link_libraries(calculate_MME ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtsam)
+# Remove calculate_MME since it depends on ROS
+# add_executable(calculate_MME source/calculate_MME.cpp)
+# target_link_libraries(calculate_MME ${PCL_LIBRARIES} gtsam)
