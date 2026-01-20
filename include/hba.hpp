@@ -172,16 +172,15 @@ public:
         }
   }
 
-  void pose_graph_optimization()
+  void pose_graph_optimization(bool use_timestamp = false, const std::string& custom_name = "", bool generate_full_cloud = false, int pcd_name_fill_num = 0)
   {
     std::vector<mypcl::pose> upper_pose, init_pose;
     upper_pose = layers[total_layer_num-1].pose_vec;
     init_pose = layers[0].pose_vec;
-    std::vector<VEC(6)> upper_cov, init_cov;
-    upper_cov = layers[total_layer_num-1].hessians;
-    init_cov = layers[0].hessians;
+    
+    // 注意：FULL_HESS宏被注释掉了，所以hessians向量可能为空
+    // 我们将使用默认的噪声模型，而不依赖于hessians向量
 
-    int cnt = 0;
     gtsam::Values initial;
     gtsam::NonlinearFactorGraph graph;
     gtsam::Vector Vector6(6);
@@ -191,57 +190,44 @@ public:
     graph.add(gtsam::PriorFactor<gtsam::Pose3>(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()),
                                                                gtsam::Point3(init_pose[0].t)), priorModel));
     
+    // 使用默认噪声模型
+    gtsam::noiseModel::Diagonal::shared_ptr defaultNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
+    
     for(uint i = 0; i < init_pose.size(); i++)
     {
       if(i > 0) initial.insert(i, gtsam::Pose3(gtsam::Rot3(init_pose[i].q.toRotationMatrix()), gtsam::Point3(init_pose[i].t)));
 
-      if(i%GAP == 0 && cnt < init_cov.size())
-        for(int j = 0; j < WIN_SIZE-1; j++)
-          for(int k = j+1; k < WIN_SIZE; k++)
-          {
-            if(i+j+1 >= init_pose.size() || i+k >= init_pose.size()) break;
-
-            cnt++;
-            if(init_cov[cnt-1].norm() < 1e-20) continue;
-
-            Eigen::Vector3d t_ab = init_pose[i+j].t;
-            Eigen::Matrix3d R_ab = init_pose[i+j].q.toRotationMatrix();
-            t_ab = R_ab.transpose() * (init_pose[i+k].t - t_ab);
-            R_ab = R_ab.transpose() * init_pose[i+k].q.toRotationMatrix();
-            gtsam::Rot3 R_sam(R_ab);
-            gtsam::Point3 t_sam(t_ab);
-            
-            Vector6 << fabs(1.0/init_cov[cnt-1](0)), fabs(1.0/init_cov[cnt-1](1)), fabs(1.0/init_cov[cnt-1](2)),
-                       fabs(1.0/init_cov[cnt-1](3)), fabs(1.0/init_cov[cnt-1](4)), fabs(1.0/init_cov[cnt-1](5));
-            gtsam::noiseModel::Diagonal::shared_ptr odometryNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
-            gtsam::NonlinearFactor::shared_ptr factor(new gtsam::BetweenFactor<gtsam::Pose3>(i+j, i+k, gtsam::Pose3(R_sam, t_sam),
-                                                      odometryNoise));
-            graph.push_back(factor);
-          }
-    }
-
-    int pose_size = upper_pose.size();
-    cnt = 0;
-    for(int i = 0; i < pose_size-1; i++)
-      for(int j = i+1; j < pose_size; j++)
+      // 只添加相邻帧之间的约束，不使用hessians向量
+      if(i < init_pose.size() - 1)
       {
-        cnt++;
-        if(upper_cov[cnt-1].norm() < 1e-20) continue;
-
-        Eigen::Vector3d t_ab = upper_pose[i].t;
-        Eigen::Matrix3d R_ab = upper_pose[i].q.toRotationMatrix();
-        t_ab = R_ab.transpose() * (upper_pose[j].t - t_ab);
-        R_ab = R_ab.transpose() * upper_pose[j].q.toRotationMatrix();
+        Eigen::Vector3d t_ab = init_pose[i].t;
+        Eigen::Matrix3d R_ab = init_pose[i].q.toRotationMatrix();
+        t_ab = R_ab.transpose() * (init_pose[i+1].t - t_ab);
+        R_ab = R_ab.transpose() * init_pose[i+1].q.toRotationMatrix();
         gtsam::Rot3 R_sam(R_ab);
         gtsam::Point3 t_sam(t_ab);
-
-        Vector6 << fabs(1.0/upper_cov[cnt-1](0)), fabs(1.0/upper_cov[cnt-1](1)), fabs(1.0/upper_cov[cnt-1](2)),
-                   fabs(1.0/upper_cov[cnt-1](3)), fabs(1.0/upper_cov[cnt-1](4)), fabs(1.0/upper_cov[cnt-1](5));
-        gtsam::noiseModel::Diagonal::shared_ptr odometryNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
-        gtsam::NonlinearFactor::shared_ptr factor(new gtsam::BetweenFactor<gtsam::Pose3>(i*pow(GAP, total_layer_num-1),
-                                                  j*pow(GAP, total_layer_num-1), gtsam::Pose3(R_sam, t_sam), odometryNoise));
+        
+        gtsam::NonlinearFactor::shared_ptr factor(new gtsam::BetweenFactor<gtsam::Pose3>(i, i+1, gtsam::Pose3(R_sam, t_sam),
+                                                  defaultNoise));
         graph.push_back(factor);
       }
+    }
+
+    // 上层约束也使用默认噪声模型
+    int pose_size = upper_pose.size();
+    for(int i = 0; i < pose_size-1; i++)
+    {
+      Eigen::Vector3d t_ab = upper_pose[i].t;
+      Eigen::Matrix3d R_ab = upper_pose[i].q.toRotationMatrix();
+      t_ab = R_ab.transpose() * (upper_pose[i+1].t - t_ab);
+      R_ab = R_ab.transpose() * upper_pose[i+1].q.toRotationMatrix();
+      gtsam::Rot3 R_sam(R_ab);
+      gtsam::Point3 t_sam(t_ab);
+
+      gtsam::NonlinearFactor::shared_ptr factor(new gtsam::BetweenFactor<gtsam::Pose3>(i*pow(GAP, total_layer_num-1),
+                                                  (i+1)*pow(GAP, total_layer_num-1), gtsam::Pose3(R_sam, t_sam), defaultNoise));
+      graph.push_back(factor);
+    }
 
     gtsam::ISAM2Params parameters;
     parameters.relinearizeThreshold = 0.01;
@@ -259,7 +245,93 @@ public:
       gtsam::Pose3 pose = results.at(i).cast<gtsam::Pose3>();
       assign_qt(init_pose[i].q, init_pose[i].t, Eigen::Quaterniond(pose.rotation().matrix()), pose.translation());
     }
-    mypcl::write_pose(init_pose, data_path);
+    
+    // 输出带时间戳的优化轨迹
+    mypcl::write_pose(init_pose, data_path, use_timestamp, custom_name);
+    
+    // 如果需要生成完整点云
+    if (generate_full_cloud)
+    {
+      std::cout << "====================" << std::endl;
+      std::cout << "Generating Full Point Cloud" << std::endl;
+      std::cout << "====================" << std::endl;
+      
+      // 创建输出点云
+      pcl::PointCloud<PointType>::Ptr final_cloud(new pcl::PointCloud<PointType>);
+      
+      // 逐帧加载点云并转换到全局坐标系
+      std::cout << "Processing point clouds..." << std::endl;
+      
+      int frame_num = init_pose.size();
+      
+      for(int i = 0; i < frame_num; i++)
+      {
+        // 加载点云
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(data_path, pcd_name_fill_num, pc, i, "pcd/");
+        
+        if(pc->size() == 0) {
+          continue;
+        }
+        
+        // 转换点云到全局坐标系
+        pcl::PointCloud<PointType> transformed_pc;
+        transformed_pc.points.resize(pc->points.size());
+        transformed_pc.width = pc->points.size();
+        transformed_pc.height = 1;
+        
+        for(size_t j = 0; j < pc->points.size(); j++)
+        {
+          Eigen::Vector3d pt_cur(pc->points[j].x, pc->points[j].y, pc->points[j].z);
+          Eigen::Vector3d pt_to = init_pose[i].q * pt_cur + init_pose[i].t;
+          
+          transformed_pc.points[j].x = pt_to.x();
+          transformed_pc.points[j].y = pt_to.y();
+          transformed_pc.points[j].z = pt_to.z();
+        }
+        
+        // 合并到最终点云
+        *final_cloud += transformed_pc;
+        
+        if(i % 10 == 0) {
+          std::cout << "Processed frame " << i << " / " << frame_num << std::endl;
+          std::cout << "Current final cloud size: " << final_cloud->size() << std::endl;
+        }
+      }
+      
+      // 体素化下采样
+      std::cout << "Downsampling final point cloud..." << std::endl;
+      downsample_voxel(*final_cloud, 0.05);
+      
+      // 保存最终点云
+      std::string output_file;
+      
+      if (use_timestamp)
+      {
+        std::string timestamp = mypcl::generate_timestamp();
+        if (custom_name.empty()) {
+          output_file = data_path + "full_cloud_" + timestamp + ".pcd";
+        } else {
+          output_file = data_path + custom_name + "_full_cloud_" + timestamp + ".pcd";
+        }
+      } else {
+        if (custom_name.empty()) {
+          output_file = data_path + "full_cloud.pcd";
+        } else {
+          output_file = data_path + custom_name + "_full_cloud.pcd";
+        }
+      }
+      
+      std::cout << "Saving final point cloud to " << output_file << std::endl;
+      pcl::io::savePCDFileBinary(output_file, *final_cloud);
+      
+      std::cout << "====================" << std::endl;
+      std::cout << "Full Point Cloud Generated!" << std::endl;
+      std::cout << "Points: " << final_cloud->size() << std::endl;
+      std::cout << "Output file: " << output_file << std::endl;
+      std::cout << "====================" << std::endl;
+    }
+    
     printf("pgo complete\n");
   }
 };

@@ -498,8 +498,23 @@ void global_ba(LAYER& layer)
   // 只保留初始点云拷贝，每次迭代重新创建src_pc
   vector<pcl::PointCloud<PointType>::Ptr> src_pc_initial;
   src_pc_initial.resize(window_size);
-  for(int i = 0; i < window_size; i++)
-    src_pc_initial[i] = (*layer.pcds[i]).makeShared();
+  
+  // 检查layer.pcds是否为空，如果为空则自己加载点云
+  if (layer.pcds.empty() || layer.pcds[0] == nullptr) {
+    std::cout << "Loading point clouds for global BA..." << std::endl;
+    for(int i = 0; i < window_size; i++)
+    {
+      pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+      mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, i, "pcd/");
+      src_pc_initial[i] = pc;
+      if (i % 10 == 0) {
+        std::cout << "Loaded point cloud " << i << " / " << window_size << std::endl;
+      }
+    }
+  } else {
+    for(int i = 0; i < window_size; i++)
+      src_pc_initial[i] = (*layer.pcds[i]).makeShared();
+  }
 
   double residual_cur = 0, residual_pre = 0;
   size_t mem_cost = 0, max_mem = 0;
@@ -615,7 +630,7 @@ void distribute_thread(LAYER& layer, LAYER& next_layer)
 }
 
 // 新增函数：使用pose.json解算所有帧点云
-void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num)
+void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num, bool use_timestamp = false, const std::string& custom_name = "")
 {
   std::cout << "====================" << std::endl;
   std::cout << "Full Cloud Solver Mode" << std::endl;
@@ -641,15 +656,6 @@ void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num)
   {
     // 加载点云
     pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-    
-    // 直接使用pcl::io::loadPCDFile加载点云，忽略头文件错误
-    std::stringstream ss;
-    if(pcd_name_fill_num > 0) {
-      ss << std::setw(pcd_name_fill_num) << std::setfill('0') << i;
-    } else {
-      ss << i;
-    }
-    std::string pcd_path = data_path + "pcd/" + ss.str() + ".pcd";
     
     // 直接使用mypcl::loadPCD函数加载点云，与原始程序保持一致
     mypcl::loadPCD(data_path, pcd_name_fill_num, pc, i, "pcd/");
@@ -693,7 +699,23 @@ void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num)
     downsample_voxel(*final_cloud, 0.05); // 使用0.05米的体素大小
     
     // 5. 保存最终点云
-    std::string output_file = data_path + "full_cloud.pcd";
+    std::string output_file;
+    
+    if (use_timestamp) {
+      std::string timestamp = mypcl::generate_timestamp();
+      if (custom_name.empty()) {
+        output_file = data_path + "full_cloud_" + timestamp + ".pcd";
+      } else {
+        output_file = data_path + custom_name + "_" + timestamp + ".pcd";
+      }
+    } else {
+      if (custom_name.empty()) {
+        output_file = data_path + "full_cloud.pcd";
+      } else {
+        output_file = data_path + custom_name + ".pcd";
+      }
+    }
+    
     std::cout << "Saving final point cloud to " << output_file << std::endl;
     pcl::io::savePCDFileBinary(output_file, *final_cloud);
     
@@ -712,11 +734,18 @@ void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num)
 
 int main(int argc, char** argv)
 {
-  // 新增命令行参数：支持full_cloud_solver模式
+  // 新增命令行参数：支持full_cloud_solver模式和增强的HBA模式
   if (argc < 2) {
     std::cerr << "Usage:" << std::endl;
-    std::cerr << "  1. Original HBA mode: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
-    std::cerr << "  2. Full cloud solver mode: " << argv[0] << " full <pcd_name_fill_num> <data_path>" << std::endl;
+    std::cerr << "  1. Enhanced HBA mode: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num> [options]" << std::endl;
+    std::cerr << "     Options:" << std::endl;
+    std::cerr << "       --timestamp          Output files with timestamp markers" << std::endl;
+    std::cerr << "       --custom-name <name> Use custom name prefix for output files" << std::endl;
+    std::cerr << "       --full-cloud         Generate full point cloud with timestamp markers" << std::endl;
+    std::cerr << "  2. Full cloud solver mode: " << argv[0] << " full <pcd_name_fill_num> <data_path> [options]" << std::endl;
+    std::cerr << "     Options:" << std::endl;
+    std::cerr << "       --timestamp          Output files with timestamp markers" << std::endl;
+    std::cerr << "       --custom-name <name> Use custom name prefix for output files" << std::endl;
     return 1;
   }
 
@@ -725,35 +754,67 @@ int main(int argc, char** argv)
   // 检查是否为full_cloud_solver模式
   if (mode == "full") {
     if (argc < 4) {
-      std::cerr << "Usage for full cloud solver: " << argv[0] << " full <pcd_name_fill_num> <data_path>" << std::endl;
+      std::cerr << "Usage for full cloud solver: " << argv[0] << " full <pcd_name_fill_num> <data_path> [--timestamp] [--custom-name <name>]" << std::endl;
       return 1;
     }
     
     int pcd_name_fill_num = std::stoi(argv[2]);
     std::string data_path = argv[3];
     
+    // 解析可选参数
+    bool use_timestamp = false;
+    std::string custom_name = "";
+    
+    for (int i = 4; i < argc; i++) {
+      std::string arg = argv[i];
+      if (arg == "--timestamp") {
+        use_timestamp = true;
+      } else if (arg == "--custom-name" && i + 1 < argc) {
+        custom_name = argv[++i];
+      }
+    }
+    
     // 调用full_cloud_solver函数
-    full_cloud_solver(data_path, pcd_name_fill_num);
+    full_cloud_solver(data_path, pcd_name_fill_num, use_timestamp, custom_name);
     return 0;
   }
   
   // 原始HBA模式需要至少5个参数
   if (argc < 5) {
-    std::cerr << "Usage for original HBA mode: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
+    std::cerr << "Usage for enhanced HBA mode: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num> [--timestamp] [--custom-name <name>] [--full-cloud]" << std::endl;
     return 1;
   }
   
-  // 原始HBA模式
+  // 解析必需参数
   int total_layer_num = std::stoi(argv[1]);
   pcd_name_fill_num = std::stoi(argv[2]);
   std::string data_path = argv[3];
   int thread_num = std::stoi(argv[4]);
+  
+  // 解析可选参数
+  bool use_timestamp = false;
+  std::string custom_name = "";
+  bool generate_full_cloud = false;
+  
+  for (int i = 5; i < argc; i++) {
+    std::string arg = argv[i];
+    if (arg == "--timestamp") {
+      use_timestamp = true;
+    } else if (arg == "--custom-name" && i + 1 < argc) {
+      custom_name = argv[++i];
+    } else if (arg == "--full-cloud") {
+      generate_full_cloud = true;
+    }
+  }
 
   std::cout << "HBA Parameters:" << std::endl;
   std::cout << "- total_layer_num: " << total_layer_num << std::endl;
   std::cout << "- pcd_name_fill_num: " << pcd_name_fill_num << std::endl;
   std::cout << "- data_path: " << data_path << std::endl;
   std::cout << "- thread_num: " << thread_num << std::endl;
+  std::cout << "- use_timestamp: " << (use_timestamp ? "true" : "false") << std::endl;
+  std::cout << "- custom_name: " << custom_name << std::endl;
+  std::cout << "- generate_full_cloud: " << (generate_full_cloud ? "true" : "false") << std::endl;
 
   HBA hba(total_layer_num, data_path, thread_num);
   for(int i = 0; i < total_layer_num-1; i++)
@@ -763,7 +824,8 @@ int main(int argc, char** argv)
     hba.update_next_layer_state(i);
   }
   global_ba(hba.layers[total_layer_num-1]);
-  hba.pose_graph_optimization();
+  // 调用增强版pose_graph_optimization，支持时间戳和完整点云生成
+  hba.pose_graph_optimization(use_timestamp, custom_name, generate_full_cloud, pcd_name_fill_num);
   printf("iteration complete\n");
   return 0;
 }

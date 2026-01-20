@@ -139,14 +139,49 @@ namespace mypcl
     return *(std::next(dis_vec.begin(), (int)((ratio) * dis_vec.size())));
   }
 
-  void write_pose(std::vector<pose>& pose_vec, std::string path)
+  // 生成带月日时分秒标记的字符串
+  std::string generate_timestamp()
   {
+    auto now = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm now_tm = *std::localtime(&now_c);
+    
+    std::stringstream ss;
+    ss << std::setw(2) << std::setfill('0') << now_tm.tm_mon + 1;
+    ss << std::setw(2) << std::setfill('0') << now_tm.tm_mday;
+    ss << std::setw(2) << std::setfill('0') << now_tm.tm_hour;
+    ss << std::setw(2) << std::setfill('0') << now_tm.tm_min;
+    ss << std::setw(2) << std::setfill('0') << now_tm.tm_sec;
+    
+    return ss.str();
+  }
+
+  void write_pose(std::vector<pose>& pose_vec, std::string path, bool use_timestamp = false, const std::string& custom_name = "")
+  {
+    std::string filename;
+    
+    if (use_timestamp) {
+      std::string timestamp = generate_timestamp();
+      if (custom_name.empty()) {
+        filename = "pose_" + timestamp + ".json";
+      } else {
+        filename = custom_name + "_" + timestamp + ".json";
+      }
+    } else {
+      if (custom_name.empty()) {
+        filename = "pose.json";
+      } else {
+        filename = custom_name + ".json";
+      }
+    }
+    
     std::ofstream file;
-    file.open(path + "pose.json", std::ofstream::trunc);
+    file.open(path + filename, std::ofstream::trunc);
     file.close();
+    
     Eigen::Quaterniond q0(pose_vec[0].q.w(), pose_vec[0].q.x(), pose_vec[0].q.y(), pose_vec[0].q.z());
     Eigen::Vector3d t0(pose_vec[0].t(0), pose_vec[0].t(1), pose_vec[0].t(2));
-    file.open(path + "pose.json", std::ofstream::app);
+    file.open(path + filename, std::ofstream::app);
 
     for(size_t i = 0; i < pose_vec.size(); i++)
     {
@@ -163,6 +198,8 @@ namespace mypcl
       if(i < pose_vec.size()-1) file << "\n";
     }
     file.close();
+    
+    std::cout << "Saved pose to: " << path << filename << std::endl;
   }
 
   void writeEVOPose(std::vector<double>& lidar_times, std::vector<pose>& pose_vec, std::string path)

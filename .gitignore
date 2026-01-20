@@ -6,6 +6,7 @@ bin/
 
 # Data directory
 park/
+kitti07
 
 # Compressed files
 *.zip
