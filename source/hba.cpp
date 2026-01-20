@@ -72,22 +72,17 @@ void cut_voxel(unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*>& feat_map,
 
 void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
 {
+  std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << " started." << std::endl;
+  
   int& part_length = layer.part_length;
   int& layer_num = layer.layer_num;
+  
+  std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", part_length=" << part_length << ", layer_num=" << layer_num << "" << std::endl;
+  
   for(int i = thread_id*part_length; i < (thread_id+1)*part_length; i++)
   {
-    // 只在第一次迭代时加载点云，后续迭代复用
-    vector<pcl::PointCloud<PointType>::Ptr> raw_pc;
-    if(layer_num == 1) {
-      raw_pc.resize(WIN_SIZE);
-      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-      {
-        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-        raw_pc[j-i*GAP] = pc;
-      }
-    }
-
+    std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", processing i=" << i << " (loop start)" << std::endl;
+    
     double residual_cur = 0, residual_pre = 0;
     vector<IMUST> x_buf(WIN_SIZE);
     for(int j = 0; j < WIN_SIZE; j++)
@@ -99,18 +94,32 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
     size_t mem_cost = 0;
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << " started." << std::endl;
+      
       // 每次迭代重新创建src_pc，避免累积内存
       vector<pcl::PointCloud<PointType>::Ptr> src_pc;
       src_pc.resize(WIN_SIZE);
       
       if(layer_num != 1)
+      {
+        std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", using existing pcds (layer_num != 1)" << std::endl;
         for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
           src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+      }
       else
-        for(int j = 0; j < WIN_SIZE; j++)
-          // 直接使用makeShared拷贝原始点云，避免多次加载
-          src_pc[j] = (*raw_pc[j]).makeShared();
+      {
+        std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", loading pcds from disk" << std::endl;
+        // 每次迭代都重新加载点云，避免一次性加载大量点云到内存
+        for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+        {
+          pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+          mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+          src_pc[j-i*GAP] = pc;
+        }
+        std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", pcds loaded successfully" << std::endl;
+      }
 
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", creating surf_map" << std::endl;
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
       
       for(size_t j = 0; j < WIN_SIZE; j++)
@@ -123,50 +132,77 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
         cut_voxel(surf_map, *src_pc[j], Eigen::Quaterniond(x_buf[j].R), x_buf[j].p,
                   j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio);
       }
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", cut_voxel completed, surf_map.size()=" << surf_map.size() << std::endl;
       
       // 清除不再需要的点云数据
       src_pc.clear();
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", src_pc cleared" << std::endl;
       
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", starting recut" << std::endl;
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         iter->second->recut();
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", recut completed" << std::endl;
       
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", starting tras_opt" << std::endl;
       VOX_HESS voxhess(WIN_SIZE);
       for(auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
         iter->second->tras_opt(voxhess);
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", tras_opt completed" << std::endl;
 
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", starting VOX_OPTIMIZER" << std::endl;
       VOX_OPTIMIZER opt_lsv(WIN_SIZE);
       opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
       PLV(6) hess_vec;
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", damping_iter completed, residual_cur=" << residual_cur << std::endl;
 
       // 及时释放八叉树内存
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", releasing octree memory" << std::endl;
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
       surf_map.clear();
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", octree memory released" << std::endl;
       
       if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
       {
+        std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", convergence achieved, breaking" << std::endl;
+        
         if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
         
+        // 只有在定义了FULL_HESS宏时才写入hessians向量
+        #ifdef FULL_HESS
+        std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", writing hessians (FULL_HESS defined)" << std::endl;
         for(int j = 0; j < WIN_SIZE*(WIN_SIZE-1)/2; j++)
           layer.hessians[i*(WIN_SIZE-1)*WIN_SIZE/2+j] = hess_vec[j];
+        #endif
         
         break;
       }
       residual_pre = residual_cur;
+      std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", iteration completed, residual_pre=" << residual_pre << std::endl;
     }
     
     // 只在优化完成后生成关键帧点云
+    std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << ", starting keyframe generation" << std::endl;
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
     vector<pcl::PointCloud<PointType>::Ptr> src_pc;
     src_pc.resize(WIN_SIZE);
     
     if(layer_num != 1)
+    {
       for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
         src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+    }
     else
-      for(int j = 0; j < WIN_SIZE; j++)
-        src_pc[j] = (*raw_pc[j]).makeShared();
+    {
+      // 重新加载点云用于生成关键帧
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+      {
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+        src_pc[j-i*GAP] = pc;
+      }
+    }
     
     for(size_t j = 0; j < WIN_SIZE; j++)
     {
@@ -182,45 +218,40 @@ void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
     
     // 清除不再需要的点云数据
     src_pc.clear();
-    if(layer_num == 1) {
-      raw_pc.clear();
-    }
     
     downsample_voxel(*pc_keyframe, 0.05);
     next_layer.pcds[i] = pc_keyframe;
+    
+    std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << ", i=" << i << " (loop end) completed" << std::endl;
   }
+  
+  std::cout << "[LOG] parallel_comp: thread_id=" << thread_id << " finished." << std::endl;
 }
 
 void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
 {
+  std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << " started." << std::endl;
+  
   int& part_length = layer.part_length;
   int& layer_num = layer.layer_num;
   int& left_gap_num = layer.left_gap_num;
 
+  std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", part_length=" << part_length << ", layer_num=" << layer_num << ", left_gap_num=" << left_gap_num << std::endl;
+
   double load_t = 0, undis_t = 0, dsp_t = 0, cut_t = 0, recut_t = 0, total_t = 0,
     tran_t = 0, sol_t = 0, save_t = 0;
   
-  if(layer.gap_num-(layer.thread_num-1)*part_length+1!=left_gap_num) printf("THIS IS WRONG!\n");
+  if(layer.gap_num-(layer.thread_num-1)*part_length+1!=left_gap_num) {
+    std::cout << "[ERROR] parallel_tail: gap_num calculation mismatch!" << std::endl;
+    printf("THIS IS WRONG!\n");
+  }
 
   for(uint i = thread_id*part_length; i < thread_id*part_length+left_gap_num; i++)
   {
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", processing i=" << i << " (main loop start)" << std::endl;
     printf("parallel computing %d\n", i);
     double t0, t1, t_begin;
     t_begin = get_current_time();
-    
-    // 只在第一次迭代时加载点云，后续迭代复用
-    vector<pcl::PointCloud<PointType>::Ptr> raw_pc;
-    if(layer_num == 1) {
-      raw_pc.resize(WIN_SIZE);
-      t0 = get_current_time();
-      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-      {
-        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-        raw_pc[j-i*GAP] = pc;
-      }
-      load_t += get_current_time()-t0;
-    }
 
     double residual_cur = 0, residual_pre = 0;
     vector<IMUST> x_buf(WIN_SIZE);
@@ -243,18 +274,35 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     size_t mem_cost = 0;
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << " started." << std::endl;
+      
       // 每次迭代重新创建src_pc，避免累积内存
       vector<pcl::PointCloud<PointType>::Ptr> src_pc;
       src_pc.resize(WIN_SIZE);
       
       if(layer_num != 1)
+      {
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", using existing pcds (layer_num != 1)" << std::endl;
         for(int j = 0; j < WIN_SIZE; j++)
           src_pc[j] = (*src_pc_initial[j]).makeShared();
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", created src_pc from initial (layer_num != 1)" << std::endl;
+      }
       else
-        for(int j = 0; j < WIN_SIZE; j++)
-          // 直接使用makeShared拷贝原始点云，避免多次加载
-          src_pc[j] = (*raw_pc[j]).makeShared();
+      {
+        // 每次迭代都重新加载点云，避免一次性加载大量点云到内存
+        t0 = get_current_time();
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", loading pcds from disk" << std::endl;
+        for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+        {
+          pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+          mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+          src_pc[j-i*GAP] = pc;
+        }
+        load_t += get_current_time()-t0;
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", loaded pcds from disk" << std::endl;
+      }
 
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", creating surf_map" << std::endl;
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
 
       for(size_t j = 0; j < WIN_SIZE; j++)
@@ -272,57 +320,86 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
                   j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio);
         cut_t += get_current_time()-t0;
       }
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", cut_voxel completed, surf_map.size()=" << surf_map.size() << std::endl;
       
       // 清除不再需要的点云数据
       src_pc.clear();
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", src_pc cleared" << std::endl;
 
       t0 = get_current_time();
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", starting recut" << std::endl;
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         iter->second->recut();
       recut_t += get_current_time()-t0;
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", recut completed" << std::endl;
 
       t0 = get_current_time();
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", starting tras_opt" << std::endl;
       VOX_HESS voxhess(WIN_SIZE);
       for(auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
         iter->second->tras_opt(voxhess);
       tran_t += get_current_time()-t0;
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", tras_opt completed" << std::endl;
 
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", starting VOX_OPTIMIZER" << std::endl;
       VOX_OPTIMIZER opt_lsv(WIN_SIZE);
       t0 = get_current_time();
       opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
       PLV(6) hess_vec;
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
       sol_t += get_current_time()-t0;
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", damping_iter completed, residual_cur=" << residual_cur << std::endl;
 
       // 及时释放八叉树内存
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", releasing octree memory" << std::endl;
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
       surf_map.clear();
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", octree memory released" << std::endl;
             
       if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
       {
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", convergence achieved, breaking" << std::endl;
+        
         if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
 
+        // 只有在定义了FULL_HESS宏时才写入hessians向量
+        #ifdef FULL_HESS
         if(i < thread_id*part_length+left_gap_num)
+        {
+          std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", writing hessians (FULL_HESS defined)" << std::endl;
           for(int j = 0; j < WIN_SIZE*(WIN_SIZE-1)/2; j++)
             layer.hessians[i*(WIN_SIZE-1)*WIN_SIZE/2+j] = hess_vec[j];
+        }
+        #endif
 
         break;
       }
       residual_pre = residual_cur;
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", loop=" << loop << ", iteration completed, residual_pre=" << residual_pre << std::endl;
     }
     
     // 只在优化完成后生成关键帧点云
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", starting keyframe generation" << std::endl;
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
     vector<pcl::PointCloud<PointType>::Ptr> src_pc;
     src_pc.resize(WIN_SIZE);
     
     if(layer_num != 1)
+    {
       for(int j = 0; j < WIN_SIZE; j++)
         src_pc[j] = (*src_pc_initial[j]).makeShared();
+    }
     else
-      for(int j = 0; j < WIN_SIZE; j++)
-        src_pc[j] = (*raw_pc[j]).makeShared();
+    {
+      // 重新加载点云用于生成关键帧
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+      {
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+        src_pc[j-i*GAP] = pc;
+      }
+    }
     
     for(size_t j = 0; j < WIN_SIZE; j++)
     {
@@ -341,9 +418,7 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     // 清除不再需要的点云数据
     src_pc.clear();
     src_pc_initial.clear();
-    if(layer_num == 1) {
-      raw_pc.clear();
-    }
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << ", cleared src_pc and src_pc_initial" << std::endl;
     
     t0 = get_current_time();
     downsample_voxel(*pc_keyframe, 0.05);
@@ -354,22 +429,15 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     save_t += get_current_time()-t0;
     
     total_t += get_current_time()-t_begin;
+    
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", i=" << i << " (main loop end) completed" << std::endl;
   }
   if(layer.tail > 0)
   {
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", processing tail (layer.tail=" << layer.tail << ")" << std::endl;
+    
     int i = thread_id*part_length+left_gap_num;
-
-    // 只在第一次迭代时加载点云，后续迭代复用
-    vector<pcl::PointCloud<PointType>::Ptr> raw_pc;
-    if(layer_num == 1) {
-      raw_pc.resize(layer.last_win_size);
-      for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
-      {
-        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-        raw_pc[j-i*GAP] = pc;
-      }
-    }
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << " started" << std::endl;
 
     double residual_cur = 0, residual_pre = 0;
     vector<IMUST> x_buf(layer.last_win_size);
@@ -385,21 +453,35 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       src_pc_initial.resize(layer.last_win_size);
       for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
         src_pc_initial[j-i*GAP] = (*layer.pcds[j]).makeShared();
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loaded initial pcds (layer_num != 1)" << std::endl;
     }
 
     size_t mem_cost = 0;
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << " started" << std::endl;
+      
       // 每次迭代重新创建src_pc，避免累积内存
       vector<pcl::PointCloud<PointType>::Ptr> src_pc;
       src_pc.resize(layer.last_win_size);
       
       if(layer_num != 1)
+      {
         for(int j = 0; j < layer.last_win_size; j++)
           src_pc[j] = (*src_pc_initial[j]).makeShared();
+      }
       else
-        for(int j = 0; j < layer.last_win_size; j++)
-          src_pc[j] = (*raw_pc[j]).makeShared();          
+      {
+        // 每次迭代都重新加载点云，避免一次性加载大量点云到内存
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << ", loading pcds from disk" << std::endl;
+        for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
+        {
+          pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+          mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+          src_pc[j-i*GAP] = pc;
+        }
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << ", loaded pcds from disk" << std::endl;
+      }
 
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
 
@@ -409,9 +491,11 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
         cut_voxel(surf_map, *src_pc[j], Quaterniond(x_buf[j].R), x_buf[j].p,
                   j, layer.voxel_size, layer.last_win_size, layer.eigen_ratio);
       }
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << ", cut_voxel completed, surf_map.size()=" << surf_map.size() << std::endl;
       
       // 清除不再需要的点云数据
       src_pc.clear();
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << ", src_pc cleared" << std::endl;
       
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         iter->second->recut();
@@ -434,25 +518,40 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
       {
         if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
 
+        // 只有在定义了FULL_HESS宏时才写入hessians向量
+        #ifdef FULL_HESS
+        std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << ", writing hessians (FULL_HESS defined)" << std::endl;
         for(int j = 0; j < layer.last_win_size*(layer.last_win_size-1)/2; j++)
           layer.hessians[i*(WIN_SIZE-1)*WIN_SIZE/2+j] = hess_vec[j];
+        #endif
         
         break;
       }
       residual_pre = residual_cur;
+      std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", loop=" << loop << ", iteration completed, residual_pre=" << residual_pre << std::endl;
     }
     
     // 只在优化完成后生成关键帧点云
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << ", starting keyframe generation" << std::endl;
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
     vector<pcl::PointCloud<PointType>::Ptr> src_pc;
     src_pc.resize(layer.last_win_size);
     
     if(layer_num != 1)
+    {
       for(int j = 0; j < layer.last_win_size; j++)
         src_pc[j] = (*src_pc_initial[j]).makeShared();
+    }
     else
-      for(int j = 0; j < layer.last_win_size; j++)
-        src_pc[j] = (*raw_pc[j]).makeShared();
+    {
+      // 重新加载点云用于生成关键帧
+      for(int j = i*GAP; j < i*GAP+layer.last_win_size; j++)
+      {
+        pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+        src_pc[j-i*GAP] = pc;
+      }
+    }
     
     for(size_t j = 0; j < layer.last_win_size; j++)
     {
@@ -469,31 +568,38 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     // 清除不再需要的点云数据
     src_pc.clear();
     src_pc_initial.clear();
-    if(layer_num == 1) {
-      raw_pc.clear();
-    }
     
     downsample_voxel(*pc_keyframe, 0.05);
     next_layer.pcds[i] = pc_keyframe;
+    
+    std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << ", tail i=" << i << " completed" << std::endl;
   }
+  
   printf("total time: %.2fs\n", total_t);
   printf("load pcd %.2fs %.2f%% | undistort pcd %.2fs %.2f%% | "
    "downsample %.2fs %.2f%% | cut voxel %.2fs %.2f%% | recut %.2fs %.2f%% | trans %.2fs %.2f%% | solve %.2fs %.2f%% | "
    "save pcd %.2fs %.2f%%\n",
     load_t, load_t/total_t*100, undis_t, undis_t/total_t*100,
-    dsp_t, dsp_t/total_t*100, cut_t, cut_t/total_t*100, recut_t, recut_t/total_t*100, tran_t, tran_t/total_t*100,
-    sol_t, sol_t/total_t*100, save_t, save_t/total_t*100);
+    dsp_t, dsp_t/total_t*100, cut_t, cut_t/total_t*100, recut_t, recut_t/total_t*100, tran_t, tran_t/total_t*100, sol_t, sol_t/total_t*100,
+    save_t, save_t/total_t*100);
+    
+  std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << " finished." << std::endl;
 }
 
 void global_ba(LAYER& layer)
 {
+  std::cout << "[LOG] global_ba: started." << std::endl;
+  
   int window_size = layer.pose_vec.size();
+  std::cout << "[LOG] global_ba: window_size=" << window_size << std::endl;
+  
   vector<IMUST> x_buf(window_size);
   for(int i = 0; i < window_size; i++)
   {
     x_buf[i].R = layer.pose_vec[i].q.toRotationMatrix();
     x_buf[i].p = layer.pose_vec[i].t;
   }
+  std::cout << "[LOG] global_ba: x_buf initialized." << std::endl;
 
   // 只保留初始点云拷贝，每次迭代重新创建src_pc
   vector<pcl::PointCloud<PointType>::Ptr> src_pc_initial;
@@ -501,24 +607,30 @@ void global_ba(LAYER& layer)
   
   // 检查layer.pcds是否为空，如果为空则自己加载点云
   if (layer.pcds.empty() || layer.pcds[0] == nullptr) {
-    std::cout << "Loading point clouds for global BA..." << std::endl;
+    std::cout << "[LOG] global_ba: Loading point clouds for global BA..." << std::endl;
     for(int i = 0; i < window_size; i++)
     {
       pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
       mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, i, "pcd/");
       src_pc_initial[i] = pc;
       if (i % 10 == 0) {
-        std::cout << "Loaded point cloud " << i << " / " << window_size << std::endl;
+        std::cout << "[LOG] global_ba: Loaded point cloud " << i << " / " << window_size << std::endl;
       }
     }
+    std::cout << "[LOG] global_ba: All point clouds loaded for global BA." << std::endl;
   } else {
+    std::cout << "[LOG] global_ba: Using existing pcds from layer." << std::endl;
     for(int i = 0; i < window_size; i++)
       src_pc_initial[i] = (*layer.pcds[i]).makeShared();
+    std::cout << "[LOG] global_ba: Copied existing pcds." << std::endl;
   }
 
   double residual_cur = 0, residual_pre = 0;
   size_t mem_cost = 0, max_mem = 0;
   double dsp_t = 0, cut_t = 0, recut_t = 0, tran_t = 0, sol_t = 0, t0;
+  
+  std::cout << "[LOG] global_ba: Starting optimization loop with max_iter=" << layer.max_iter << std::endl;
+  
   for(int loop = 0; loop < layer.max_iter; loop++)
   {
     std::cout<<"---------------------"<<std::endl;
@@ -529,8 +641,11 @@ void global_ba(LAYER& layer)
     src_pc.resize(window_size);
     for(int i = 0; i < window_size; i++)
       src_pc[i] = (*src_pc_initial[i]).makeShared();
+    
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", src_pc created." << std::endl;
 
     unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", surf_map created." << std::endl;
 
     for(int i = 0; i < window_size; i++)
     {
@@ -547,86 +662,111 @@ void global_ba(LAYER& layer)
       cut_t += get_current_time() - t0;
     }
     
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", cut_voxel completed, surf_map.size()=" << surf_map.size() << std::endl;
+    
     // 清除不再需要的点云数据
     src_pc.clear();
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", src_pc cleared." << std::endl;
     
     t0 = get_current_time();
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", starting recut." << std::endl;
     for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
       iter->second->recut();
     recut_t += get_current_time() - t0;
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", recut completed." << std::endl;
     
     t0 = get_current_time();
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", starting tras_opt." << std::endl;
     VOX_HESS voxhess(window_size);
     for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
       iter->second->tras_opt(voxhess);
     tran_t += get_current_time() - t0;
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", tras_opt completed." << std::endl;
     
     t0 = get_current_time();
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", starting VOX_OPTIMIZER." << std::endl;
     VOX_OPTIMIZER opt_lsv(window_size);
     opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
     PLV(6) hess_vec;
     opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
     sol_t += get_current_time() - t0;
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", damping_iter completed, residual_cur=" << residual_cur << std::endl;
 
     // 及时释放八叉树内存
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", releasing octree memory." << std::endl;
     for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
       delete iter->second;
     surf_map.clear();
+    std::cout << "[LOG] global_ba: Iteration " << loop << ", octree memory released." << std::endl;
     
-    cout<<"Residual absolute: "<<abs(residual_pre-residual_cur)<<" | "
-      <<"percentage: "<<abs(residual_pre-residual_cur)/abs(residual_cur)<<endl;
+    std::cout << "Residual absolute: " << abs(residual_pre-residual_cur) << " | "
+      << "percentage: " << abs(residual_pre-residual_cur)/abs(residual_cur) << std::endl;
     
     if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
     {
+      std::cout << "[LOG] global_ba: Iteration " << loop << ", convergence achieved, breaking." << std::endl;
+      
       if(max_mem < mem_cost) max_mem = mem_cost;
+      
       #ifdef FULL_HESS
+      std::cout << "[LOG] global_ba: Iteration " << loop << ", writing hessians (FULL_HESS defined)." << std::endl;
       for(int i = 0; i < window_size*(window_size-1)/2; i++)
         layer.hessians[i] = hess_vec[i];
-      #else
-      // 注释掉 hessFile 相关代码，因为 hessFile 变量未定义
-      // for(int i = 0; i < window_size-1; i++)
-      // {
-      //   Matrix6d hess = Hess_cur.block(6*i, 6*i+6, 6, 6);
-      //   for(int row = 0; row < 6; row++)
-      //     for(int col = 0; col < 6; col++)
-      //       hessFile << hess(row, col) << ((row*col==25)?"":" ");
-      //   if(i < window_size-2) hessFile << "\n";
-      // }
       #endif
       break;
     }
     residual_pre = residual_cur;
+    std::cout << "[LOG] global_ba: Iteration " << loop << " completed, residual_pre=" << residual_pre << std::endl;
   }
   
   // 清除不再需要的点云数据
   src_pc_initial.clear();
+  std::cout << "[LOG] global_ba: Cleared src_pc_initial." << std::endl;
   
   for(int i = 0; i < window_size; i++)
   {
     layer.pose_vec[i].q = Quaterniond(x_buf[i].R);
     layer.pose_vec[i].t = x_buf[i].p;
   }
+  
+  std::cout << "[LOG] global_ba: Updated layer pose_vec." << std::endl;
   printf("Downsample: %f, Cut: %f, Recut: %f, Tras: %f, Sol: %f\n", dsp_t, cut_t, recut_t, tran_t, sol_t);
+  
+  std::cout << "[LOG] global_ba: finished." << std::endl;
 }
 
 void distribute_thread(LAYER& layer, LAYER& next_layer)
 {
   int& thread_num = layer.thread_num;
+  std::cout << "[LOG] distribute_thread: Starting with thread_num=" << thread_num << std::endl;
+  
   double t0 = get_current_time();
   for(int i = 0; i < thread_num; i++)
+  {
     if(i < thread_num-1)
+    {
+      std::cout << "[LOG] distribute_thread: Creating thread " << i << " for parallel_comp." << std::endl;
       layer.mthreads[i] = new thread(parallel_comp, ref(layer), i, ref(next_layer));
+    }
     else
+    {
+      std::cout << "[LOG] distribute_thread: Creating thread " << i << " for parallel_tail." << std::endl;
       layer.mthreads[i] = new thread(parallel_tail, ref(layer), i, ref(next_layer));
-  // printf("Thread distribution time: %f\n", get_current_time()-t0);
+    }
+  }
+  std::cout << "[LOG] distribute_thread: All threads created. Time taken: " << get_current_time()-t0 << " seconds." << std::endl;
 
   t0 = get_current_time();
   for(int i = 0; i < thread_num; i++)
   {
+    std::cout << "[LOG] distribute_thread: Joining thread " << i << "." << std::endl;
     layer.mthreads[i]->join();
+    std::cout << "[LOG] distribute_thread: Thread " << i << " joined." << std::endl;
     delete layer.mthreads[i];
+    std::cout << "[LOG] distribute_thread: Thread " << i << " deleted." << std::endl;
   }
-  // printf("Thread join time: %f\n", get_current_time()-t0);
+  std::cout << "[LOG] distribute_thread: All threads joined and deleted. Time taken: " << get_current_time()-t0 << " seconds." << std::endl;
+  std::cout << "[LOG] distribute_thread: Completed." << std::endl;
 }
 
 // 新增函数：使用pose.json解算所有帧点云
@@ -734,6 +874,8 @@ void full_cloud_solver(const std::string& data_path, int pcd_name_fill_num, bool
 
 int main(int argc, char** argv)
 {
+  std::cout << "[LOG] Program started. argv[0]: " << argv[0] << std::endl;
+  
   // 新增命令行参数：支持full_cloud_solver模式和增强的HBA模式
   if (argc < 2) {
     std::cerr << "Usage:" << std::endl;
@@ -750,6 +892,7 @@ int main(int argc, char** argv)
   }
 
   std::string mode = argv[1];
+  std::cout << "[LOG] Mode: " << mode << std::endl;
   
   // 检查是否为full_cloud_solver模式
   if (mode == "full") {
@@ -760,6 +903,7 @@ int main(int argc, char** argv)
     
     int pcd_name_fill_num = std::stoi(argv[2]);
     std::string data_path = argv[3];
+    std::cout << "[LOG] full_cloud_solver mode parameters: pcd_name_fill_num=" << pcd_name_fill_num << ", data_path=" << data_path << std::endl;
     
     // 解析可选参数
     bool use_timestamp = false;
@@ -769,13 +913,17 @@ int main(int argc, char** argv)
       std::string arg = argv[i];
       if (arg == "--timestamp") {
         use_timestamp = true;
+        std::cout << "[LOG] Option: --timestamp" << std::endl;
       } else if (arg == "--custom-name" && i + 1 < argc) {
         custom_name = argv[++i];
+        std::cout << "[LOG] Option: --custom-name=" << custom_name << std::endl;
       }
     }
     
     // 调用full_cloud_solver函数
+    std::cout << "[LOG] Calling full_cloud_solver function..." << std::endl;
     full_cloud_solver(data_path, pcd_name_fill_num, use_timestamp, custom_name);
+    std::cout << "[LOG] full_cloud_solver function returned." << std::endl;
     return 0;
   }
   
@@ -791,6 +939,8 @@ int main(int argc, char** argv)
   std::string data_path = argv[3];
   int thread_num = std::stoi(argv[4]);
   
+  std::cout << "[LOG] Enhanced HBA mode parameters: total_layer_num=" << total_layer_num << ", pcd_name_fill_num=" << pcd_name_fill_num << ", data_path=" << data_path << ", thread_num=" << thread_num << std::endl;
+  
   // 解析可选参数
   bool use_timestamp = false;
   std::string custom_name = "";
@@ -800,10 +950,13 @@ int main(int argc, char** argv)
     std::string arg = argv[i];
     if (arg == "--timestamp") {
       use_timestamp = true;
+      std::cout << "[LOG] Option: --timestamp" << std::endl;
     } else if (arg == "--custom-name" && i + 1 < argc) {
       custom_name = argv[++i];
+      std::cout << "[LOG] Option: --custom-name=" << custom_name << std::endl;
     } else if (arg == "--full-cloud") {
       generate_full_cloud = true;
+      std::cout << "[LOG] Option: --full-cloud" << std::endl;
     }
   }
 
@@ -816,16 +969,30 @@ int main(int argc, char** argv)
   std::cout << "- custom_name: " << custom_name << std::endl;
   std::cout << "- generate_full_cloud: " << (generate_full_cloud ? "true" : "false") << std::endl;
 
+  std::cout << "[LOG] Creating HBA object..." << std::endl;
   HBA hba(total_layer_num, data_path, thread_num);
+  std::cout << "[LOG] HBA object created." << std::endl;
+  
   for(int i = 0; i < total_layer_num-1; i++)
   {
+    std::cout << "[LOG] Layer " << i << " processing started." << std::endl;
     std::cout<<"---------------------"<<std::endl;
     distribute_thread(hba.layers[i], hba.layers[i+1]);
+    std::cout << "[LOG] distribute_thread completed for layer " << i << "." << std::endl;
     hba.update_next_layer_state(i);
+    std::cout << "[LOG] update_next_layer_state completed for layer " << i << "." << std::endl;
   }
+  
+  std::cout << "[LOG] Calling global_ba..." << std::endl;
   global_ba(hba.layers[total_layer_num-1]);
+  std::cout << "[LOG] global_ba completed." << std::endl;
+  
   // 调用增强版pose_graph_optimization，支持时间戳和完整点云生成
+  std::cout << "[LOG] Calling pose_graph_optimization..." << std::endl;
   hba.pose_graph_optimization(use_timestamp, custom_name, generate_full_cloud, pcd_name_fill_num);
+  std::cout << "[LOG] pose_graph_optimization completed." << std::endl;
+  
   printf("iteration complete\n");
+  std::cout << "[LOG] Program completed successfully." << std::endl;
   return 0;
 }

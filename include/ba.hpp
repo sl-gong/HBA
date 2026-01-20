@@ -755,7 +755,10 @@ public:
 
   size_t check_mem()
   {
+    #ifdef __linux__
     FILE* file = fopen("/proc/self/status", "r");
+    if (!file) return 0;
+    
     int result = -1;
     char line[128];
 
@@ -777,6 +780,15 @@ public:
     fclose(file);
 
     return result;
+    #else
+    // macOS: 使用sysctl获取内存使用情况
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+      // 返回RSS内存使用量，单位为KB
+      return usage.ru_maxrss;
+    }
+    return 0;
+    #endif
   }
 };
 
