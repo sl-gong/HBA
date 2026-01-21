@@ -586,12 +586,19 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
   std::cout << "[LOG] parallel_tail: thread_id=" << thread_id << " finished." << std::endl;
 }
 
-void global_ba(LAYER& layer)
+double global_ba(LAYER& layer)
 {
   std::cout << "[LOG] global_ba: started." << std::endl;
   
   int window_size = layer.pose_vec.size();
   std::cout << "[LOG] global_ba: window_size=" << window_size << std::endl;
+  
+  // 保存初始位姿用于计算优化前后的变化
+  vector<mypcl::pose> initial_poses(window_size);
+  for(int i = 0; i < window_size; i++)
+  {
+    initial_poses[i] = layer.pose_vec[i];
+  }
   
   vector<IMUST> x_buf(window_size);
   for(int i = 0; i < window_size; i++)
@@ -732,7 +739,38 @@ void global_ba(LAYER& layer)
   std::cout << "[LOG] global_ba: Updated layer pose_vec." << std::endl;
   printf("Downsample: %f, Cut: %f, Recut: %f, Tras: %f, Sol: %f\n", dsp_t, cut_t, recut_t, tran_t, sol_t);
   
+  std::cout << "[LOG] global_ba: Final residual: " << residual_cur << std::endl;
   std::cout << "[LOG] global_ba: finished." << std::endl;
+  
+  // 计算优化前后的位姿变化
+  double avg_translation_change = 0.0, max_translation_change = 0.0;
+  double avg_rotation_change = 0.0, max_rotation_change = 0.0;
+  
+  for(int i = 0; i < window_size; i++)
+  {
+    // 计算平移变化
+    Eigen::Vector3d trans_diff = layer.pose_vec[i].t - initial_poses[i].t;
+    double trans_change = trans_diff.norm();
+    avg_translation_change += trans_change;
+    if(trans_change > max_translation_change) max_translation_change = trans_change;
+    
+    // 计算旋转变化（角度）
+    Eigen::Quaterniond rot_diff = layer.pose_vec[i].q * initial_poses[i].q.inverse();
+    double rot_angle = rot_diff.angularDistance(initial_poses[i].q) * 180.0 / M_PI;
+    avg_rotation_change += rot_angle;
+    if(rot_angle > max_rotation_change) max_rotation_change = rot_angle;
+  }
+  
+  avg_translation_change /= window_size;
+  avg_rotation_change /= window_size;
+  
+  std::cout << "[LOG] global_ba: Pose Change Statistics:" << std::endl;
+  std::cout << "[LOG] global_ba:   Average translation change: " << avg_translation_change << " meters" << std::endl;
+  std::cout << "[LOG] global_ba:   Maximum translation change: " << max_translation_change << " meters" << std::endl;
+  std::cout << "[LOG] global_ba:   Average rotation change: " << avg_rotation_change << " degrees" << std::endl;
+  std::cout << "[LOG] global_ba:   Maximum rotation change: " << max_rotation_change << " degrees" << std::endl;
+  
+  return residual_cur;
 }
 
 void distribute_thread(LAYER& layer, LAYER& next_layer)
@@ -983,14 +1021,85 @@ int main(int argc, char** argv)
     std::cout << "[LOG] update_next_layer_state completed for layer " << i << "." << std::endl;
   }
   
+  // 调用global_ba并获取最终残差
   std::cout << "[LOG] Calling global_ba..." << std::endl;
-  global_ba(hba.layers[total_layer_num-1]);
-  std::cout << "[LOG] global_ba completed." << std::endl;
+  double final_global_residual = global_ba(hba.layers[total_layer_num-1]);
+  std::cout << "[LOG] global_ba completed. Final residual: " << final_global_residual << std::endl;
   
   // 调用增强版pose_graph_optimization，支持时间戳和完整点云生成
   std::cout << "[LOG] Calling pose_graph_optimization..." << std::endl;
   hba.pose_graph_optimization(use_timestamp, custom_name, generate_full_cloud, pcd_name_fill_num);
   std::cout << "[LOG] pose_graph_optimization completed." << std::endl;
+  
+  // 计算轨迹的整体精度指标
+  const auto& final_layer = hba.layers[total_layer_num-1];
+  size_t total_frames = final_layer.pose_vec.size();
+  
+  // 计算相邻帧之间的平移和旋转变化
+  double avg_translation_step = 0.0;
+  double avg_rotation_step = 0.0;
+  double max_translation_step = 0.0;
+  double max_rotation_step = 0.0;
+  
+  if (total_frames > 1) {
+    for (size_t i = 0; i < total_frames - 1; i++) {
+      // 计算相邻帧之间的平移变化
+      Eigen::Vector3d trans_diff = final_layer.pose_vec[i+1].t - final_layer.pose_vec[i].t;
+      double trans_step = trans_diff.norm();
+      avg_translation_step += trans_step;
+      if (trans_step > max_translation_step) max_translation_step = trans_step;
+      
+      // 计算相邻帧之间的旋转变化（角度）
+      Eigen::Quaterniond rot_diff = final_layer.pose_vec[i+1].q * final_layer.pose_vec[i].q.inverse();
+      double rot_step = rot_diff.angularDistance(final_layer.pose_vec[i].q) * 180.0 / M_PI;
+      avg_rotation_step += rot_step;
+      if (rot_step > max_rotation_step) max_rotation_step = rot_step;
+    }
+    
+    avg_translation_step /= (total_frames - 1);
+    avg_rotation_step /= (total_frames - 1);
+  }
+  
+  // 计算轨迹的总长度
+  double total_trajectory_length = 0.0;
+  if (total_frames > 1) {
+    for (size_t i = 0; i < total_frames - 1; i++) {
+      Eigen::Vector3d trans_diff = final_layer.pose_vec[i+1].t - final_layer.pose_vec[i].t;
+      total_trajectory_length += trans_diff.norm();
+    }
+  }
+  
+  // 输出详细的精度相关信息
+  std::cout << "====================" << std::endl;
+  std::cout << "HBA Trajectory Optimization Results" << std::endl;
+  std::cout << "====================" << std::endl;
+  std::cout << "Configuration Parameters:" << std::endl;
+  std::cout << "  Data Path: " << data_path << std::endl;
+  std::cout << "  Total Layer Num: " << total_layer_num << std::endl;
+  std::cout << "  Thread Num: " << thread_num << std::endl;
+  std::cout << "  PCD Name Fill Num: " << pcd_name_fill_num << std::endl;
+  std::cout << "====================" << std::endl;
+  std::cout << "Optimization Precision Metrics:" << std::endl;
+  std::cout << "  Final Global BA Residual: " << std::fixed << std::setprecision(6) << final_global_residual << std::endl;
+  std::cout << "  Total Optimized Frames: " << total_frames << std::endl;
+  std::cout << "  Total Trajectory Length: " << std::fixed << std::setprecision(3) << total_trajectory_length << " meters" << std::endl;
+  std::cout << "====================" << std::endl;
+  std::cout << "Frame-to-Frame Consistency:" << std::endl;
+  std::cout << "  Average Translation Step: " << std::fixed << std::setprecision(4) << avg_translation_step << " meters" << std::endl;
+  std::cout << "  Maximum Translation Step: " << std::fixed << std::setprecision(4) << max_translation_step << " meters" << std::endl;
+  std::cout << "  Average Rotation Step: " << std::fixed << std::setprecision(4) << avg_rotation_step << " degrees" << std::endl;
+  std::cout << "  Maximum Rotation Step: " << std::fixed << std::setprecision(4) << max_rotation_step << " degrees" << std::endl;
+  std::cout << "====================" << std::endl;
+  std::cout << "Output Information:" << std::endl;
+  std::cout << "  Trajectory optimization completed successfully!" << std::endl;
+  std::cout << "  Optimized poses saved to: " << data_path << "pose.json" << std::endl;
+  
+  if (generate_full_cloud) {
+    std::cout << "  Full point cloud generated!" << std::endl;
+    std::cout << "  Check the output file in the data directory." << std::endl;
+  }
+  
+  std::cout << "====================" << std::endl;
   
   printf("iteration complete\n");
   std::cout << "[LOG] Program completed successfully." << std::endl;
