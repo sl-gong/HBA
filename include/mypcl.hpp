@@ -54,15 +54,28 @@ namespace mypcl
   {
     std::vector<pose> pose_vec;
     std::fstream file;
+    
+    // 检查文件是否存在
     file.open(filename);
+    if (!file.is_open()) {
+      std::cerr << "[ERROR] read_pose: Could not open file " << filename << std::endl;
+      return pose_vec; // 返回空向量
+    }
+    
     double tx, ty, tz, w, x, y, z;
-    while(!file.eof())
+    int line_count = 0;
+    while(file >> tx >> ty >> tz >> w >> x >> y >> z) // 使用流提取操作符的返回值来检查是否成功读取
     {
-      file >> tx >> ty >> tz >> w >> x >> y >> z;
       Eigen::Quaterniond q(w, x, y, z);
       Eigen::Vector3d t(tx, ty, tz);
       pose_vec.push_back(pose(qe * q, qe * t + te));
+      line_count++;
     }
+    
+    if (line_count == 0) {
+      std::cerr << "[WARNING] read_pose: No valid pose data found in file " << filename << std::endl;
+    }
+    
     file.close();
     return pose_vec;
   }

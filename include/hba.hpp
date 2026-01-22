@@ -50,10 +50,10 @@ public:
   void init_storage(int total_layer_num_)
   {
     mthreads.resize(thread_num);
-    mem_costs.resize(thread_num);
+    mem_costs.resize(thread_num, 0.0); // 直接resize并初始化，而不是push_back
 
     pcds.resize(pose_size);
-    pose_vec.resize(pose_size);
+    // pose_vec已经在read_pose()或init_parameter()中初始化，不需要再次resize
 
     #ifdef FULL_HESS
     if(layer_num < total_layer_num_)
@@ -71,9 +71,6 @@ public:
       printf("hessian_size: %d\n", hessian_size);
     }
     #endif
-
-    for(int i = 0; i < thread_num; i++)
-      mem_costs.push_back(0);
   }
 
   void init_parameter(int pose_size_ = 0)
@@ -131,7 +128,13 @@ public:
   {
     total_layer_num = total_layer_num_;
     thread_num = thread_num_;
-    data_path = data_path_;
+    
+    // 确保data_path以斜杠结尾
+    if (!data_path_.empty() && data_path_.back() != '/') {
+      data_path = data_path_ + "/";
+    } else {
+      data_path = data_path_;
+    }
 
     layers.resize(total_layer_num);
     for(int i = 0; i < total_layer_num; i++)
@@ -141,6 +144,14 @@ public:
     }
     layers[0].data_path = data_path;
     layers[0].pose_vec = mypcl::read_pose(data_path + "pose.json");
+    
+    // 检查pose_vec是否为空
+    if (layers[0].pose_vec.empty()) {
+      std::cerr << "[ERROR] HBA constructor: No pose data loaded from " << data_path + "pose.json" << std::endl;
+      // 初始化一个默认姿势，避免后续崩溃
+      layers[0].pose_vec.push_back(mypcl::pose());
+    }
+    
     layers[0].init_parameter();
     layers[0].init_storage(total_layer_num);
 
@@ -150,6 +161,8 @@ public:
       pose_size_ += layers[i-1].tail == 0 ? layers[i-1].left_gap_num : (layers[i-1].left_gap_num+1);
       layers[i].init_parameter(pose_size_);
       layers[i].init_storage(total_layer_num);
+      
+      // 确保子目录路径正确构建
       layers[i].data_path = layers[i-1].data_path + "process1/";
     }
     printf("HBA init done!\n");
@@ -162,33 +175,160 @@ public:
         for(int j = 0; j < layers[cur_layer_num].part_length; j++)
         {
           int index = (i * layers[cur_layer_num].part_length + j) * GAP;
-          layers[cur_layer_num+1].pose_vec[i*layers[cur_layer_num].part_length+j] = layers[cur_layer_num].pose_vec[index];
+          // 确保index不越界
+          if (index < layers[cur_layer_num].pose_vec.size()) {
+            int next_index = i * layers[cur_layer_num].part_length + j;
+            if (next_index < layers[cur_layer_num+1].pose_vec.size()) {
+              layers[cur_layer_num+1].pose_vec[next_index] = layers[cur_layer_num].pose_vec[index];
+            }
+          } else {
+            std::cout << "[WARNING] update_next_layer_state: index " << index << " out of bounds (pose_vec size: " << layers[cur_layer_num].pose_vec.size() << ")" << std::endl;
+          }
         }
       else
         for(int j = 0; j < layers[cur_layer_num].j_upper; j++)
         {
           int index = (i * layers[cur_layer_num].part_length + j) * GAP;
-          layers[cur_layer_num+1].pose_vec[i*layers[cur_layer_num].part_length+j] = layers[cur_layer_num].pose_vec[index];
+          // 确保index不越界
+          if (index < layers[cur_layer_num].pose_vec.size()) {
+            int next_index = i * layers[cur_layer_num].part_length + j;
+            if (next_index < layers[cur_layer_num+1].pose_vec.size()) {
+              layers[cur_layer_num+1].pose_vec[next_index] = layers[cur_layer_num].pose_vec[index];
+            }
+          } else {
+            std::cout << "[WARNING] update_next_layer_state: index " << index << " out of bounds (pose_vec size: " << layers[cur_layer_num].pose_vec.size() << ")" << std::endl;
+          }
         }
   }
 
   void pose_graph_optimization(bool use_timestamp = false, const std::string& custom_name = "", bool generate_full_cloud = false, int pcd_name_fill_num = 0)
   {
+    std::cout << "[LOG] pose_graph_optimization: started." << std::endl;
+    
+    // 特殊情况：如果init_pose太小，直接输出结果，不进行优化
+    if (layers[0].pose_vec.size() <= 1) {
+      std::cout << "[LOG] pose_graph_optimization: init_pose size <= 1, skipping optimization." << std::endl;
+      
+      // 直接输出轨迹
+      mypcl::write_pose(layers[0].pose_vec, data_path, use_timestamp, custom_name);
+      
+      // 如果需要生成完整点云，直接使用原始轨迹
+      if (generate_full_cloud) {
+        std::cout << "[LOG] pose_graph_optimization: generating full cloud without optimization." << std::endl;
+        // 实现简化的点云生成逻辑
+        pcl::PointCloud<PointType>::Ptr final_cloud(new pcl::PointCloud<PointType>);
+        int frame_num = layers[0].pose_vec.size();
+        
+        for(int i = 0; i < frame_num; i++)
+        {
+          pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+          mypcl::loadPCD(data_path, pcd_name_fill_num, pc, i, "pcd/");
+          
+          if(pc->size() > 0) {
+            pcl::PointCloud<PointType> transformed_pc;
+            transformed_pc.points.resize(pc->points.size());
+            transformed_pc.width = pc->points.size();
+            transformed_pc.height = 1;
+            
+            for(size_t j = 0; j < pc->points.size(); j++)
+            {
+              Eigen::Vector3d pt_cur(pc->points[j].x, pc->points[j].y, pc->points[j].z);
+              Eigen::Vector3d pt_to = layers[0].pose_vec[i].q * pt_cur + layers[0].pose_vec[i].t;
+              
+              transformed_pc.points[j].x = pt_to.x();
+              transformed_pc.points[j].y = pt_to.y();
+              transformed_pc.points[j].z = pt_to.z();
+            }
+            
+            *final_cloud += transformed_pc;
+          }
+          
+          if(i % 10 == 0) {
+            std::cout << "Processed frame " << i << " / " << frame_num << std::endl;
+          }
+        }
+        
+        // 保存最终点云
+        std::string output_file;
+        if (use_timestamp) {
+          std::string timestamp = mypcl::generate_timestamp();
+          if (custom_name.empty()) {
+            output_file = data_path + "full_cloud_" + timestamp + ".pcd";
+          } else {
+            output_file = data_path + custom_name + "_full_cloud_" + timestamp + ".pcd";
+          }
+        } else {
+          if (custom_name.empty()) {
+            output_file = data_path + "full_cloud.pcd";
+          } else {
+            output_file = data_path + custom_name + "_full_cloud.pcd";
+          }
+        }
+        
+        pcl::io::savePCDFileBinary(output_file, *final_cloud);
+        std::cout << "[LOG] pose_graph_optimization: full cloud saved to " << output_file << std::endl;
+      }
+      
+      std::cout << "[LOG] pose_graph_optimization: finished." << std::endl;
+      return;
+    }
+    
+    // 检查layers和pose_vec的有效性
+    std::cout << "[LOG] pose_graph_optimization: checking layers validity..." << std::endl;
+    if (total_layer_num <= 0) {
+      std::cout << "[ERROR] pose_graph_optimization: total_layer_num <= 0" << std::endl;
+      return;
+    }
+    
+    if (layers.empty()) {
+      std::cout << "[ERROR] pose_graph_optimization: layers vector is empty" << std::endl;
+      return;
+    }
+    
+    if (total_layer_num-1 >= layers.size()) {
+      std::cout << "[ERROR] pose_graph_optimization: invalid layer index" << std::endl;
+      return;
+    }
+    
+    std::cout << "[LOG] pose_graph_optimization: copying pose vectors..." << std::endl;
     std::vector<mypcl::pose> upper_pose, init_pose;
-    upper_pose = layers[total_layer_num-1].pose_vec;
-    init_pose = layers[0].pose_vec;
+    
+    if (!layers[total_layer_num-1].pose_vec.empty()) {
+      upper_pose = layers[total_layer_num-1].pose_vec;
+      std::cout << "[LOG] pose_graph_optimization: upper_pose size: " << upper_pose.size() << std::endl;
+    } else {
+      std::cout << "[WARNING] pose_graph_optimization: upper layer pose_vec is empty" << std::endl;
+    }
+    
+    if (!layers[0].pose_vec.empty()) {
+      init_pose = layers[0].pose_vec;
+      std::cout << "[LOG] pose_graph_optimization: init_pose size: " << init_pose.size() << std::endl;
+    } else {
+      std::cout << "[ERROR] pose_graph_optimization: init layer pose_vec is empty" << std::endl;
+      return;
+    }
     
     // 注意：FULL_HESS宏被注释掉了，所以hessians向量可能为空
     // 我们将使用默认的噪声模型，而不依赖于hessians向量
 
+    std::cout << "[LOG] pose_graph_optimization: initializing gtsam objects..." << std::endl;
     gtsam::Values initial;
     gtsam::NonlinearFactorGraph graph;
     gtsam::Vector Vector6(6);
     Vector6 << 1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8;
+    
+    std::cout << "[LOG] pose_graph_optimization: creating noise models..." << std::endl;
     gtsam::noiseModel::Diagonal::shared_ptr priorModel = gtsam::noiseModel::Diagonal::Variances(Vector6);
-    initial.insert(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()), gtsam::Point3(init_pose[0].t)));
-    graph.add(gtsam::PriorFactor<gtsam::Pose3>(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()),
+    
+    std::cout << "[LOG] pose_graph_optimization: inserting initial pose..." << std::endl;
+    if (init_pose.size() > 0) {
+      initial.insert(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()), gtsam::Point3(init_pose[0].t)));
+      graph.add(gtsam::PriorFactor<gtsam::Pose3>(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()),
                                                                gtsam::Point3(init_pose[0].t)), priorModel));
+    } else {
+      std::cout << "[ERROR] pose_graph_optimization: init_pose is empty" << std::endl;
+      return;
+    }
     
     // 使用默认噪声模型
     gtsam::noiseModel::Diagonal::shared_ptr defaultNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
@@ -242,8 +382,10 @@ public:
 
     for(uint i = 0; i < results.size(); i++)
     {
-      gtsam::Pose3 pose = results.at(i).cast<gtsam::Pose3>();
-      assign_qt(init_pose[i].q, init_pose[i].t, Eigen::Quaterniond(pose.rotation().matrix()), pose.translation());
+      if (i < init_pose.size()) { // 确保不越界访问
+        gtsam::Pose3 pose = results.at(i).cast<gtsam::Pose3>();
+        assign_qt(init_pose[i].q, init_pose[i].t, Eigen::Quaterniond(pose.rotation().matrix()), pose.translation());
+      }
     }
     
     // 输出带时间戳的优化轨迹
