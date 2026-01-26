@@ -1,0 +1,33 @@
+# Build directory
+build/
+
+# Binary files
+bin/
+
+# Data directory
+park/
+kitti07/
+multi-strip/
+
+# Compressed files
+*.zip
+
+# IDE files
+.vscode/
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Backup files
+*.bak
+*.swp
+*.swo

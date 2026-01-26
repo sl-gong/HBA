@@ -172,6 +172,16 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
   for(uint i = thread_id*part_length; i < thread_id*part_length+left_gap_num; i++)
   {
     printf("parallel computing %d\n", i);
+    printf("  i: %u, GAP: %d, WIN_SIZE: %d\n", i, GAP, WIN_SIZE);
+    printf("  i*GAP: %u, i*GAP+WIN_SIZE: %u\n", i*GAP, i*GAP+WIN_SIZE);
+    printf("  pose_vec.size(): %lu\n", layer.pose_vec.size());
+    
+    // Check if we're out of bounds
+    if (i*GAP+WIN_SIZE > layer.pose_vec.size()) {
+      printf("  ERROR: Out of bounds! i*GAP+WIN_SIZE=%u > pose_vec.size()=%lu\n", i*GAP+WIN_SIZE, layer.pose_vec.size());
+      continue;
+    }
+    
     double t0, t1, t_begin;
     t_begin = get_current_time();
     
@@ -182,6 +192,7 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     vector<IMUST> x_buf(WIN_SIZE);
     for(int j = 0; j < WIN_SIZE; j++)
     {
+      printf("  j: %d, i*GAP+j: %u\n", j, i*GAP+j);
       x_buf[j].R = layer.pose_vec[i*GAP+j].q.toRotationMatrix();
       x_buf[j].p = layer.pose_vec[i*GAP+j].t;
     }
@@ -198,55 +209,79 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     for(int loop = 0; loop < layer.max_iter; loop++)
     {
       if(layer_num == 1)
+    {
+      t0 = get_current_time();
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
       {
-        t0 = get_current_time();
-        for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+        printf("  Loading PCD for j=%d\n", j);
+        if(loop == 0)
         {
-          if(loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j-i*GAP] = pc;
-          }
-          src_pc[j-i*GAP] = (*raw_pc[j-i*GAP]).makeShared();
+          printf("    Creating new PCD pointer\n");
+          pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
+          printf("    Calling mypcl::loadPCD with data_path=%s, j=%d, prefix=pcd/\n", layer.data_path.c_str(), j);
+          mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+          printf("    Loaded %lu points\n", pc->points.size());
+          raw_pc[j-i*GAP] = pc;
         }
-        load_t += get_current_time()-t0;
+        printf("    Making shared copy\n");
+        src_pc[j-i*GAP] = (*raw_pc[j-i*GAP]).makeShared();
       }
+      load_t += get_current_time()-t0;
+      printf("  PCD loading completed\n");
+    }
 
+      printf("  Starting voxel processing\n");
       unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
 
       for(size_t j = 0; j < WIN_SIZE; j++)
       {
+        printf("  Processing PCD %lu/%d\n", j+1, WIN_SIZE);
         t0 = get_current_time();
-        if(layer.downsample_size > 0) downsample_voxel(*src_pc[j], layer.downsample_size);
+        if(layer.downsample_size > 0) {
+          printf("    Downsampling with size %f\n", layer.downsample_size);
+          downsample_voxel(*src_pc[j], layer.downsample_size);
+          printf("    Downsampled to %lu points\n", src_pc[j]->points.size());
+        }
         dsp_t += get_current_time()-t0;
 
         t0 = get_current_time();
+        printf("    Cutting voxel\n");
         cut_voxel(surf_map, *src_pc[j], Quaterniond(x_buf[j].R), x_buf[j].p,
                   j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio);
+        printf("    Voxel cut completed\n");
         cut_t += get_current_time()-t0;
       }
 
+      printf("  Voxel processing completed, surf_map size: %lu\n", surf_map.size());
+      printf("  Starting recut\n");
       t0 = get_current_time();
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         iter->second->recut();
       recut_t += get_current_time()-t0;
+      printf("  Recut completed\n");
 
+      printf("  Starting VOX_HESS creation\n");
       t0 = get_current_time();
       VOX_HESS voxhess(WIN_SIZE);
       for(auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
         iter->second->tras_opt(voxhess);
       tran_t += get_current_time()-t0;
+      printf("  VOX_HESS creation completed\n");
 
+      printf("  Starting optimization\n");
       VOX_OPTIMIZER opt_lsv(WIN_SIZE);
       t0 = get_current_time();
       opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
+      printf("  Outlier removal completed\n");
       PLV(6) hess_vec;
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
       sol_t += get_current_time()-t0;
+      printf("  Optimization completed\n");
 
+      printf("  Starting memory cleanup\n");
       for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
         delete iter->second;
+      printf("  Memory cleanup completed\n");
             
       if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
       {

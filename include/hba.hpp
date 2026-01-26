@@ -129,28 +129,47 @@ public:
 
   HBA(int total_layer_num_, std::string data_path_, int thread_num_)
   {
+    printf("HBA constructor start\n");
     total_layer_num = total_layer_num_;
     thread_num = thread_num_;
-    data_path = data_path_;
+    
+    // Ensure data_path has a trailing slash
+    if (data_path_.back() != '/') {
+      data_path = data_path_ + '/';
+    } else {
+      data_path = data_path_;
+    }
 
+    printf("Resizing layers to %d\n", total_layer_num);
     layers.resize(total_layer_num);
     for(int i = 0; i < total_layer_num; i++)
     {
       layers[i].layer_num = i+1;
       layers[i].thread_num = thread_num;
+      printf("Layer %d initialized\n", i+1);
     }
+    printf("Setting layer 0 data path to: %s\n", data_path.c_str());
     layers[0].data_path = data_path;
-    layers[0].pose_vec = mypcl::read_pose(data_path + "pose.json");
+    
+    std::string pose_file_path = data_path + "pose.json";
+    printf("Reading pose from: %s\n", pose_file_path.c_str());
+    layers[0].pose_vec = mypcl::read_pose(pose_file_path);
+    printf("Read %lu poses\n", layers[0].pose_vec.size());
+    printf("Calling init_parameter() on layer 0\n");
     layers[0].init_parameter();
+    printf("Calling init_storage() on layer 0\n");
     layers[0].init_storage(total_layer_num);
 
     for(int i = 1; i < total_layer_num; i++)
     {
+      printf("Initializing layer %d\n", i+1);
       int pose_size_ = (layers[i-1].thread_num-1)*layers[i-1].part_length;
       pose_size_ += layers[i-1].tail == 0 ? layers[i-1].left_gap_num : (layers[i-1].left_gap_num+1);
+      printf("Layer %d pose_size_: %d\n", i+1, pose_size_);
       layers[i].init_parameter(pose_size_);
       layers[i].init_storage(total_layer_num);
       layers[i].data_path = layers[i-1].data_path + "process1/";
+      printf("Layer %d data path: %s\n", i+1, layers[i].data_path.c_str());
     }
     printf("HBA init done!\n");
   }

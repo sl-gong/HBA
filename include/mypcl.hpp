@@ -55,15 +55,22 @@ namespace mypcl
     std::vector<pose> pose_vec;
     std::fstream file;
     file.open(filename);
+    
+    if (!file.is_open()) {
+      std::cerr << "Error: Could not open pose file: " << filename << std::endl;
+      return pose_vec;
+    }
+    
     double tx, ty, tz, w, x, y, z;
-    while(!file.eof())
+    while(file >> tx >> ty >> tz >> w >> x >> y >> z)
     {
-      file >> tx >> ty >> tz >> w >> x >> y >> z;
       Eigen::Quaterniond q(w, x, y, z);
       Eigen::Vector3d t(tx, ty, tz);
       pose_vec.push_back(pose(qe * q, qe * t + te));
     }
+    
     file.close();
+    std::cout << "Read " << pose_vec.size() << " poses from " << filename << std::endl;
     return pose_vec;
   }
 

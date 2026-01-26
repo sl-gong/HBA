@@ -9,6 +9,14 @@
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCholesky>
 
+// Add headers for memory checking
+#include <cstdio>
+#ifdef __linux__
+#include <cstring>
+#elif __APPLE__
+#include <mach/mach.h>
+#endif
+
 #include "tools.hpp"
 
 // Helper function to get current time in seconds
@@ -746,7 +754,11 @@ public:
 
   size_t check_mem()
   {
+    #ifdef __linux__
     FILE* file = fopen("/proc/self/status", "r");
+    if (file == nullptr) {
+      return 0;
+    }
     int result = -1;
     char line[128];
 
@@ -766,8 +778,24 @@ public:
       }
     }
     fclose(file);
-
     return result;
+    #elif __APPLE__
+    // macOS implementation using sysctl
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t size = MACH_TASK_BASIC_INFO_COUNT;
+    kern_return_t kerr = task_info(mach_task_self(),
+                                   MACH_TASK_BASIC_INFO,
+                                   (task_info_t)&info,
+                                   &size);
+    if (kerr == KERN_SUCCESS) {
+      return info.resident_size / 1024; // Convert to KB
+    } else {
+      return 0;
+    }
+    #else
+    // Default fallback
+    return 0;
+    #endif
   }
 };
 
