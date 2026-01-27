@@ -9,6 +9,7 @@
 #include <pcl/point_types.h>
 #include <Eigen/Dense>
 #include <Eigen/StdVector>
+#include <ctime>
 
 typedef std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d> > vector_vec3d;
 typedef std::vector<Eigen::Quaterniond, Eigen::aligned_allocator<Eigen::Quaterniond> > vector_quad;
@@ -16,6 +17,15 @@ typedef std::vector<Eigen::Quaterniond, Eigen::aligned_allocator<Eigen::Quaterni
 typedef pcl::PointXYZ PointType;
 // typedef pcl::PointXYZI PointType;
 typedef Eigen::Matrix<double, 6, 6> Matrix6d;
+
+// Helper function to generate datetime string in YYYYMMDDHHmmss format
+std::string get_datetime_string() {
+    std::time_t now = std::time(nullptr);
+    std::tm* tm_info = std::localtime(&now);
+    char buffer[20];
+    std::strftime(buffer, 20, "%Y%m%d%H%M%S", tm_info);
+    return std::string(buffer);
+}
 
 namespace mypcl
 {
@@ -50,7 +60,8 @@ namespace mypcl
   
   std::vector<pose> read_pose(std::string filename,
                               Eigen::Quaterniond qe = Eigen::Quaterniond(1, 0, 0, 0),
-                              Eigen::Vector3d te = Eigen::Vector3d(0, 0, 0))
+                              Eigen::Vector3d te = Eigen::Vector3d(0, 0, 0),
+                              bool apply_inverse_transform = true)
   {
     std::vector<pose> pose_vec;
     std::fstream file;
@@ -62,14 +73,49 @@ namespace mypcl
     }
     
     double tx, ty, tz, w, x, y, z;
+    std::vector<pose> temp_poses;
+    
+    // First pass: read all poses
     while(file >> tx >> ty >> tz >> w >> x >> y >> z)
     {
       Eigen::Quaterniond q(w, x, y, z);
       Eigen::Vector3d t(tx, ty, tz);
-      pose_vec.push_back(pose(qe * q, qe * t + te));
+      temp_poses.push_back(pose(q, t));
     }
     
     file.close();
+    
+    if (temp_poses.empty()) {
+      std::cerr << "Error: No poses found in file: " << filename << std::endl;
+      return pose_vec;
+    }
+    
+    // Apply inverse transform if needed (to match write_pose and write_pose_file behavior)
+    if (apply_inverse_transform) {
+      // Get the first pose as the transform reference (q0, t0)
+      Eigen::Quaterniond q0 = temp_poses[0].q;
+      Eigen::Vector3d t0 = temp_poses[0].t;
+      
+      // Apply inverse transform to all poses
+      for (size_t i = 0; i < temp_poses.size(); i++) {
+        Eigen::Quaterniond q = temp_poses[i].q;
+        Eigen::Vector3d t = temp_poses[i].t;
+        
+        // Inverse transform: q = q0 * q, t = q0 * t + t0
+        Eigen::Quaterniond transformed_q = q0 * q;
+        Eigen::Vector3d transformed_t = q0 * t + t0;
+        
+        pose_vec.push_back(pose(qe * transformed_q, qe * transformed_t + te));
+      }
+    } else {
+      // No inverse transform, just apply external transform if provided
+      for (size_t i = 0; i < temp_poses.size(); i++) {
+        Eigen::Quaterniond q = temp_poses[i].q;
+        Eigen::Vector3d t = temp_poses[i].t;
+        pose_vec.push_back(pose(qe * q, qe * t + te));
+      }
+    }
+    
     std::cout << "Read " << pose_vec.size() << " poses from " << filename << std::endl;
     return pose_vec;
   }
@@ -165,6 +211,29 @@ namespace mypcl
            << pose_vec[i].t(2) << " "
            << pose_vec[i].q.w() << " " << pose_vec[i].q.x() << " "
            << pose_vec[i].q.y() << " " << pose_vec[i].q.z();
+      if(i < pose_vec.size()-1) file << "\n";
+    }
+    file.close();
+  }
+
+  void write_pose_file(std::vector<pose>& pose_vec, std::string filename)
+  {
+    std::ofstream file;
+    file.open(filename, std::ofstream::trunc);
+    file.close();
+    Eigen::Quaterniond q0(pose_vec[0].q.w(), pose_vec[0].q.x(), pose_vec[0].q.y(), pose_vec[0].q.z());
+    Eigen::Vector3d t0(pose_vec[0].t(0), pose_vec[0].t(1), pose_vec[0].t(2));
+    file.open(filename, std::ofstream::app);
+
+    for(size_t i = 0; i < pose_vec.size(); i++)
+    {
+      Eigen::Vector3d t_temp = q0.inverse()*(pose_vec[i].t-t0);
+      Eigen::Quaterniond q_temp = q0.inverse()*pose_vec[i].q;
+      file << t_temp(0) << " "
+           << t_temp(1) << " "
+           << t_temp(2) << " "
+           << q_temp.w() << " " << q_temp.x() << " "
+           << q_temp.y() << " " << q_temp.z();
       if(i < pose_vec.size()-1) file << "\n";
     }
     file.close();

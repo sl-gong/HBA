@@ -524,31 +524,169 @@ void distribute_thread(LAYER& layer, LAYER& next_layer)
 
 int main(int argc, char** argv)
 {
-  if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
+  // Check for point cloud only mode
+  bool cloud_only_mode = false;
+  std::string pose_file = "";
+  int total_layer_num = 2;
+  int pcd_name_fill_num = 0;
+  std::string data_path = "";
+  int thread_num = 4;
+  
+  // Parse command line arguments
+  for (int i = 1; i < argc; i++) {
+    std::string arg = argv[i];
+    if (arg == "--cloud-only") {
+      cloud_only_mode = true;
+      if (i + 3 < argc) {
+        data_path = argv[i+1];
+        pcd_name_fill_num = std::stoi(argv[i+2]);
+        pose_file = argv[i+3];
+        i += 3;
+      } else {
+        std::cerr << "Usage for cloud-only mode: " << argv[0] << " --cloud-only <data_path> <pcd_name_fill_num> <pose_file>" << std::endl;
+        return 1;
+      }
+    } else if (i == 1 && !cloud_only_mode) {
+      // Standard HBA mode
+      if (argc < 5) {
+        std::cerr << "Usage: " << argv[0] << " <total_layer_num> <pcd_name_fill_num> <data_path> <thread_num>" << std::endl;
+        std::cerr << "OR " << argv[0] << " --cloud-only <data_path> <pcd_name_fill_num> <pose_file>" << std::endl;
+        return 1;
+      }
+      total_layer_num = std::stoi(argv[1]);
+      pcd_name_fill_num = std::stoi(argv[2]);
+      data_path = argv[3];
+      thread_num = std::stoi(argv[4]);
+      break;
+    }
+  }
+
+  if (data_path.empty()) {
+    std::cerr << "Error: data_path is required" << std::endl;
     return 1;
   }
-
-  int total_layer_num = std::stoi(argv[1]);
-  pcd_name_fill_num = std::stoi(argv[2]);
-  string data_path = argv[3];
-  int thread_num = std::stoi(argv[4]);
-
-  std::cout << "HBA Parameters:" << std::endl;
-  std::cout << "- total_layer_num: " << total_layer_num << std::endl;
-  std::cout << "- pcd_name_fill_num: " << pcd_name_fill_num << std::endl;
-  std::cout << "- data_path: " << data_path << std::endl;
-  std::cout << "- thread_num: " << thread_num << std::endl;
-
-  HBA hba(total_layer_num, data_path, thread_num);
-  for(int i = 0; i < total_layer_num-1; i++)
-  {
-    std::cout<<"---------------------"<<std::endl;
-    distribute_thread(hba.layers[i], hba.layers[i+1]);
-    hba.update_next_layer_state(i);
+  
+  // Ensure data_path has a trailing slash
+  if (!data_path.empty() && data_path.back() != '/') {
+    data_path += '/';
   }
-  global_ba(hba.layers[total_layer_num-1]);
-  hba.pose_graph_optimization();
-  printf("iteration complete\n");
-  return 0;
+
+  if (cloud_only_mode) {
+    // Cloud only mode: generate point cloud using external pose file
+    std::cout << "Cloud-only mode enabled" << std::endl;
+    std::cout << "- data_path: " << data_path << std::endl;
+    std::cout << "- pcd_name_fill_num: " << pcd_name_fill_num << std::endl;
+    std::cout << "- pose_file: " << pose_file << std::endl;
+    
+    // Load poses from external file
+    printf("Loading poses from %s...\n", pose_file.c_str());
+    std::vector<mypcl::pose> poses = mypcl::read_pose(pose_file);
+    
+    if (poses.empty()) {
+      std::cerr << "Error: Failed to load poses from " << pose_file << std::endl;
+      return 1;
+    }
+    
+    // Generate full point cloud in batches using loaded trajectory
+    printf("Generating full point cloud...\n");
+    pcl::PointCloud<PointType>::Ptr full_cloud(new pcl::PointCloud<PointType>);
+    
+    // Process in batches to avoid high memory usage
+    const int batch_size = 100; // Process 100 frames per batch
+    int total_poses = poses.size();
+    
+    for (int batch_start = 0; batch_start < total_poses; batch_start += batch_size) {
+      int batch_end = std::min(batch_start + batch_size, total_poses);
+      printf("Processing batch %d-%d of %d\n", batch_start, batch_end-1, total_poses);
+      
+      pcl::PointCloud<PointType>::Ptr batch_cloud(new pcl::PointCloud<PointType>);
+      
+      for (int i = batch_start; i < batch_end; i++) {
+        pcl::PointCloud<PointType>::Ptr current_cloud(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(data_path, pcd_name_fill_num, current_cloud, i, "pcd/");
+        
+        // Transform point cloud using loaded pose
+        mypcl::transform_pointcloud(*current_cloud, *current_cloud, 
+                                    poses[i].t, 
+                                    poses[i].q);
+        
+        *batch_cloud += *current_cloud;
+      }
+      
+      // Add batch to full cloud
+      *full_cloud += *batch_cloud;
+    }
+    
+    // Save full point cloud to timestamped PCD file
+    std::string datetime_str = get_datetime_string();
+    std::string cloud_filename = "full_" + datetime_str + ".pcd";
+    printf("Saving full point cloud to %s\n", cloud_filename.c_str());
+    pcl::io::savePCDFileBinary(cloud_filename, *full_cloud);
+    printf("Full point cloud saved with %lu points\n", full_cloud->size());
+    
+    printf("Cloud-only mode complete\n");
+    return 0;
+  } else {
+    // Standard HBA mode
+    std::cout << "HBA Parameters:" << std::endl;
+    std::cout << "- total_layer_num: " << total_layer_num << std::endl;
+    std::cout << "- pcd_name_fill_num: " << pcd_name_fill_num << std::endl;
+    std::cout << "- data_path: " << data_path << std::endl;
+    std::cout << "- thread_num: " << thread_num << std::endl;
+
+    HBA hba(total_layer_num, data_path, thread_num);
+    for(int i = 0; i < total_layer_num-1; i++)
+    {
+      std::cout<<"---------------------"<<std::endl;
+      distribute_thread(hba.layers[i], hba.layers[i+1]);
+      hba.update_next_layer_state(i);
+    }
+    global_ba(hba.layers[total_layer_num-1]);
+    hba.pose_graph_optimization();
+    
+    // Export optimized poses to timestamped JSON file
+    std::string datetime_str = get_datetime_string();
+    std::string pose_filename = "pos_" + datetime_str + ".json";
+    printf("Exporting optimized poses to %s\n", pose_filename.c_str());
+    mypcl::write_pose_file(hba.layers[total_layer_num-1].pose_vec, pose_filename);
+    
+    // Generate full point cloud in batches using optimized trajectory
+    printf("Generating full point cloud...\n");
+    pcl::PointCloud<PointType>::Ptr full_cloud(new pcl::PointCloud<PointType>);
+    
+    // Process in batches to avoid high memory usage
+    const int batch_size = 100; // Process 100 frames per batch
+    int total_poses = hba.layers[total_layer_num-1].pose_vec.size();
+    
+    for (int batch_start = 0; batch_start < total_poses; batch_start += batch_size) {
+      int batch_end = std::min(batch_start + batch_size, total_poses);
+      printf("Processing batch %d-%d of %d\n", batch_start, batch_end-1, total_poses);
+      
+      pcl::PointCloud<PointType>::Ptr batch_cloud(new pcl::PointCloud<PointType>);
+      
+      for (int i = batch_start; i < batch_end; i++) {
+        pcl::PointCloud<PointType>::Ptr current_cloud(new pcl::PointCloud<PointType>);
+        mypcl::loadPCD(hba.layers[0].data_path, pcd_name_fill_num, current_cloud, i, "pcd/");
+        
+        // Transform point cloud using optimized pose
+        mypcl::transform_pointcloud(*current_cloud, *current_cloud, 
+                                    hba.layers[total_layer_num-1].pose_vec[i].t, 
+                                    hba.layers[total_layer_num-1].pose_vec[i].q);
+        
+        *batch_cloud += *current_cloud;
+      }
+      
+      // Add batch to full cloud
+      *full_cloud += *batch_cloud;
+    }
+    
+    // Save full point cloud to timestamped PCD file
+    std::string cloud_filename = "full_" + datetime_str + ".pcd";
+    printf("Saving full point cloud to %s\n", cloud_filename.c_str());
+    pcl::io::savePCDFileBinary(cloud_filename, *full_cloud);
+    printf("Full point cloud saved with %lu points\n", full_cloud->size());
+    
+    printf("iteration complete\n");
+    return 0;
+  }
 }
