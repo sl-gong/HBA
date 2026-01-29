@@ -644,19 +644,65 @@ int main(int argc, char** argv)
     global_ba(hba.layers[total_layer_num-1]);
     hba.pose_graph_optimization();
     
-    // Export optimized poses to timestamped JSON file
+    // Load full original poses for point cloud generation
+    std::vector<mypcl::pose> full_original_poses = mypcl::read_pose(data_path + "pose.json", Eigen::Quaterniond(1, 0, 0, 0), Eigen::Vector3d(0, 0, 0), false);
+    
+    // Export optimized poses to timestamped JSON file (full trajectory)
     std::string datetime_str = get_datetime_string();
     std::string pose_filename = "pos_" + datetime_str + ".json";
     printf("Exporting optimized poses to %s\n", pose_filename.c_str());
-    mypcl::write_pose_file(hba.layers[total_layer_num-1].pose_vec, pose_filename);
     
-    // Generate full point cloud in batches using optimized trajectory
+    // Generate full optimized trajectory by interpolating between the sparse optimized poses
+    std::vector<mypcl::pose> full_optimized_poses;
+    full_optimized_poses.resize(full_original_poses.size());
+    
+    // Get sparse optimized poses
+    std::vector<mypcl::pose> sparse_optimized_poses = hba.layers[total_layer_num-1].pose_vec;
+    
+    // Copy optimized poses to full trajectory
+    for (size_t i = 0; i < sparse_optimized_poses.size(); i++) {
+      int original_index = i * GAP;
+      if (original_index < full_optimized_poses.size()) {
+        full_optimized_poses[original_index] = sparse_optimized_poses[i];
+      }
+    }
+    
+    // Interpolate between optimized poses for missing indices
+    for (size_t i = 1; i < sparse_optimized_poses.size(); i++) {
+      int start_idx = (i-1) * GAP;
+      int end_idx = i * GAP;
+      if (end_idx >= full_optimized_poses.size()) {
+        end_idx = full_optimized_poses.size() - 1;
+      }
+      
+      mypcl::pose start_pose = sparse_optimized_poses[i-1];
+      mypcl::pose end_pose = sparse_optimized_poses[i];
+      
+      // Linear interpolation for positions
+      // Slerp for quaternions
+      for (int j = start_idx + 1; j < end_idx; j++) {
+        double t = (j - start_idx) / (double)(end_idx - start_idx);
+        
+        // Interpolate position
+        Eigen::Vector3d interpolated_t = start_pose.t + t * (end_pose.t - start_pose.t);
+        
+        // Slerp quaternion
+        Eigen::Quaterniond interpolated_q = start_pose.q.slerp(t, end_pose.q);
+        
+        full_optimized_poses[j] = mypcl::pose(interpolated_q, interpolated_t);
+      }
+    }
+    
+    // Write full optimized trajectory
+    mypcl::write_pose_file(full_optimized_poses, pose_filename);
+    
+    // Generate full point cloud in batches using full optimized trajectory
     printf("Generating full point cloud...\n");
     pcl::PointCloud<PointType>::Ptr full_cloud(new pcl::PointCloud<PointType>);
     
     // Process in batches to avoid high memory usage
     const int batch_size = 100; // Process 100 frames per batch
-    int total_poses = hba.layers[total_layer_num-1].pose_vec.size();
+    int total_poses = full_original_poses.size();
     
     for (int batch_start = 0; batch_start < total_poses; batch_start += batch_size) {
       int batch_end = std::min(batch_start + batch_size, total_poses);
@@ -668,10 +714,10 @@ int main(int argc, char** argv)
         pcl::PointCloud<PointType>::Ptr current_cloud(new pcl::PointCloud<PointType>);
         mypcl::loadPCD(hba.layers[0].data_path, pcd_name_fill_num, current_cloud, i, "pcd/");
         
-        // Transform point cloud using optimized pose
+        // Transform point cloud using full optimized pose
         mypcl::transform_pointcloud(*current_cloud, *current_cloud, 
-                                    hba.layers[total_layer_num-1].pose_vec[i].t, 
-                                    hba.layers[total_layer_num-1].pose_vec[i].q);
+                                    full_optimized_poses[i].t, 
+                                    full_optimized_poses[i].q);
         
         *batch_cloud += *current_cloud;
       }
