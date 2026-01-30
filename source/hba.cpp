@@ -647,50 +647,67 @@ int main(int argc, char** argv)
     // Load full original poses for point cloud generation
     std::vector<mypcl::pose> full_original_poses = mypcl::read_pose(data_path + "pose.json", Eigen::Quaterniond(1, 0, 0, 0), Eigen::Vector3d(0, 0, 0), false);
     
+    // Load GTSAM optimized full trajectory (already written by pose_graph_optimization)
+    std::vector<mypcl::pose> full_optimized_poses = mypcl::read_pose(data_path + "pose.json", Eigen::Quaterniond(1, 0, 0, 0), Eigen::Vector3d(0, 0, 0), false);
+    
     // Export optimized poses to timestamped JSON file (full trajectory)
     std::string datetime_str = get_datetime_string();
     std::string pose_filename = "pos_" + datetime_str + ".json";
     printf("Exporting optimized poses to %s\n", pose_filename.c_str());
     
-    // Generate full optimized trajectory by interpolating between the sparse optimized poses
-    std::vector<mypcl::pose> full_optimized_poses;
-    full_optimized_poses.resize(full_original_poses.size());
-    
-    // Get sparse optimized poses
-    std::vector<mypcl::pose> sparse_optimized_poses = hba.layers[total_layer_num-1].pose_vec;
-    
-    // Copy optimized poses to full trajectory
-    for (size_t i = 0; i < sparse_optimized_poses.size(); i++) {
-      int original_index = i * GAP;
-      if (original_index < full_optimized_poses.size()) {
-        full_optimized_poses[original_index] = sparse_optimized_poses[i];
+    // Ensure we have the same number of poses as original
+    if (full_optimized_poses.size() != full_original_poses.size()) {
+      printf("Warning: Optimized trajectory size (%lu) does not match original (%lu). Using original size.\n", 
+             full_optimized_poses.size(), full_original_poses.size());
+      if (full_optimized_poses.size() < full_original_poses.size()) {
+        // If optimized trajectory is shorter, resize and interpolate
+        full_optimized_poses.resize(full_original_poses.size());
+        
+        // Get the last valid pose
+        mypcl::pose last_valid_pose = full_optimized_poses.back();
+        
+        // Fill the remaining poses with the last valid pose
+        for (size_t i = full_optimized_poses.size() - 1; i < full_original_poses.size(); i++) {
+          full_optimized_poses[i] = last_valid_pose;
+        }
+      } else {
+        // If optimized trajectory is longer, truncate
+        full_optimized_poses.resize(full_original_poses.size());
       }
     }
     
-    // Interpolate between optimized poses for missing indices
-    for (size_t i = 1; i < sparse_optimized_poses.size(); i++) {
-      int start_idx = (i-1) * GAP;
-      int end_idx = i * GAP;
-      if (end_idx >= full_optimized_poses.size()) {
-        end_idx = full_optimized_poses.size() - 1;
-      }
+    // Calculate trajectory optimization precision metrics
+    printf("Calculating trajectory optimization precision metrics...\n");
+    double total_position_error = 0.0;
+    double total_rotation_error = 0.0;
+    int valid_comparisons = 0;
+    
+    for (size_t i = 0; i < full_original_poses.size() && i < full_optimized_poses.size(); i++) {
+      // Calculate position error (Euclidean distance)
+      Eigen::Vector3d pos_error = full_original_poses[i].t - full_optimized_poses[i].t;
+      double pos_error_norm = pos_error.norm();
+      total_position_error += pos_error_norm;
       
-      mypcl::pose start_pose = sparse_optimized_poses[i-1];
-      mypcl::pose end_pose = sparse_optimized_poses[i];
+      // Calculate rotation error (angle between quaternions)
+      double dot_product = full_original_poses[i].q.dot(full_optimized_poses[i].q);
+      // Clamp to avoid numerical issues
+      dot_product = std::max(-1.0, std::min(1.0, dot_product));
+      double rot_error = 2.0 * std::acos(std::abs(dot_product));
+      total_rotation_error += rot_error;
       
-      // Linear interpolation for positions
-      // Slerp for quaternions
-      for (int j = start_idx + 1; j < end_idx; j++) {
-        double t = (j - start_idx) / (double)(end_idx - start_idx);
-        
-        // Interpolate position
-        Eigen::Vector3d interpolated_t = start_pose.t + t * (end_pose.t - start_pose.t);
-        
-        // Slerp quaternion
-        Eigen::Quaterniond interpolated_q = start_pose.q.slerp(t, end_pose.q);
-        
-        full_optimized_poses[j] = mypcl::pose(interpolated_q, interpolated_t);
-      }
+      valid_comparisons++;
+    }
+    
+    if (valid_comparisons > 0) {
+      double avg_position_error = total_position_error / valid_comparisons;
+      double avg_rotation_error = total_rotation_error / valid_comparisons;
+      
+      printf("Trajectory Optimization Precision Metrics:\n");
+      printf("  Valid comparisons: %d\n", valid_comparisons);
+      printf("  Average position error: %.6f meters\n", avg_position_error);
+      printf("  Average rotation error: %.6f radians (%.3f degrees)\n", avg_rotation_error, avg_rotation_error * 180.0 / M_PI);
+      printf("  Total position error: %.6f meters\n", total_position_error);
+      printf("  Total rotation error: %.6f radians (%.3f degrees)\n", total_rotation_error, total_rotation_error * 180.0 / M_PI);
     }
     
     // Write full optimized trajectory
