@@ -68,3 +68,6 @@ target_link_libraries(pcd_resolve ${PCL_LIBRARIES} ${LASZIP_LIBRARY})
 # Remove calculate_MME since it depends on ROS
 # add_executable(calculate_MME source/calculate_MME.cpp)
 # target_link_libraries(calculate_MME ${PCL_LIBRARIES} gtsam)
+add_executable(las_info source/las_info.cpp)
+target_link_libraries(las_info ${LASZIP_LIBRARY})
+target_include_directories(las_info PRIVATE ${LASZIP_INCLUDE_DIR})

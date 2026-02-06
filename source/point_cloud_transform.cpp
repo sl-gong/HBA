@@ -245,9 +245,16 @@ bool PointCloudTransformer::LoadGaussPos(const std::string& pos_path,
                                                      cols.roll, cols.pitch, cols.yaw}))
       continue;
 
+    double lat = values[cols.c1];
+    double lon = values[cols.c2];
+    double h = values[cols.c3];
+
+    double cm = 0.0;
+    Eigen::Vector2d gauss = Wgs84ToGauss3(lat, lon, cm);
+
     Pose p;
     p.t = values[cols.time];
-    p.p = Eigen::Vector3d(values[cols.c1], values[cols.c2], values[cols.c3]);
+    p.p = Eigen::Vector3d(gauss.x(), gauss.y(), h);
     p.R_wb = RPYDegToMatrix(values[cols.roll], values[cols.pitch], values[cols.yaw]);
     poses_.push_back(p);
   }
@@ -266,9 +273,11 @@ bool PointCloudTransformer::LoadWgs84PosAsNED(const std::string& pos_path,
   poses_.clear();
   std::string line;
   std::vector<double> values;
-  bool origin_set = false;
-  double lat0 = 0.0, lon0 = 0.0, h0 = 0.0;
-  Eigen::Vector3d ecef0 = Eigen::Vector3d::Zero();
+  bool origin_set = ned_origin_ready_;
+  double lat0 = ned_lat0_;
+  double lon0 = ned_lon0_;
+  double h0 = ned_h0_;
+  Eigen::Vector3d ecef0 = ned_ecef0_;
 
   while (std::getline(file, line))
   {
@@ -291,6 +300,11 @@ bool PointCloudTransformer::LoadWgs84PosAsNED(const std::string& pos_path,
       h0 = h;
       ecef0 = Wgs84ToEcef(lat0, lon0, h0);
       origin_set = true;
+      ned_origin_ready_ = true;
+      ned_lat0_ = lat0;
+      ned_lon0_ = lon0;
+      ned_h0_ = h0;
+      ned_ecef0_ = ecef0;
     }
 
     Eigen::Vector3d ecef = Wgs84ToEcef(lat, lon, h);
@@ -305,6 +319,20 @@ bool PointCloudTransformer::LoadWgs84PosAsNED(const std::string& pos_path,
 
   poses_ready_ = !poses_.empty();
   return poses_ready_;
+}
+
+void PointCloudTransformer::SetNedOrigin(double lat_deg, double lon_deg, double h)
+{
+  ned_lat0_ = lat_deg;
+  ned_lon0_ = lon_deg;
+  ned_h0_ = h;
+  ned_ecef0_ = Wgs84ToEcef(lat_deg, lon_deg, h);
+  ned_origin_ready_ = true;
+}
+
+void PointCloudTransformer::ClearNedOrigin()
+{
+  ned_origin_ready_ = false;
 }
 
 const std::vector<Pose>& PointCloudTransformer::poses() const

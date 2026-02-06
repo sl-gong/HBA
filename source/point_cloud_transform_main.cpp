@@ -5,8 +5,10 @@
 #include <laszip/laszip_api.h>
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -26,12 +28,13 @@ struct Args
   size_t index = 0;
   bool lidar_in_body = true;
   bool use_point_time = false;
+  std::string ned_origin_from;
 };
 
 void PrintUsage()
 {
   std::cout << "Usage:\n"
-            << "  point_cloud_transform_test \\\n    --mode forward|inverse \\\n    --coord gauss|ned \\\n    --pos /path/to/pos \\\n    --device /path/to/device_info.json \\\n    --las /path/to/input.las \\\n    --out /path/to/output.(las|pcd) \\\n    --time <timestamp> | --index <pose_index> [--lidar-in-body 0|1]\n\n"
+            << "  point_cloud_transform_test \\\n    --mode forward|inverse \\\n    --coord gauss|ned \\\n    --pos /path/to/pos \\\n    --device /path/to/device_info.json \\\n    --las /path/to/input.las \\\n    --out /path/to/output.(las|pcd) \\\n    --time <timestamp> | --index <pose_index> | --use-point-time \\\n    [--lidar-in-body 0|1] [--ned-origin-from /path/to/pos]\n\n"
             << "Pos format assumptions:\n"
             << "  gauss: t x y z roll pitch yaw (deg)\n"
             << "  ned:   t lat lon h roll pitch yaw (deg)\n";
@@ -97,6 +100,10 @@ bool ParseArgs(int argc, char** argv, Args& args)
     {
       args.use_point_time = true;
     }
+    else if (key == "--ned-origin-from")
+    {
+      if (!next(args.ned_origin_from)) return false;
+    }
     else if (key == "--help" || key == "-h")
     {
       return false;
@@ -139,9 +146,6 @@ bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& c
     header->x_scale_factor = 0.001;
     header->y_scale_factor = 0.001;
     header->z_scale_factor = 0.001;
-    header->x_offset = 0.0;
-    header->y_offset = 0.0;
-    header->z_offset = 0.0;
 
     double min_x = std::numeric_limits<double>::infinity();
     double min_y = std::numeric_limits<double>::infinity();
@@ -159,6 +163,10 @@ bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& c
       max_y = std::max(max_y, static_cast<double>(pt.y));
       max_z = std::max(max_z, static_cast<double>(pt.z));
     }
+
+    header->x_offset = std::floor(min_x);
+    header->y_offset = std::floor(min_y);
+    header->z_offset = std::floor(min_z);
 
     header->min_x = min_x;
     header->min_y = min_y;
@@ -206,6 +214,33 @@ bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& c
   return pcl::io::savePCDFileBinary(path, cloud) >= 0;
 }
 
+bool ReadFirstPosLatLonH(const std::string& path, double& lat, double& lon, double& h)
+{
+  std::ifstream file(path);
+  if (!file.is_open())
+    return false;
+
+  std::string line;
+  while (std::getline(file, line))
+  {
+    if (line.empty() || line[0] == '#' || line[0] == '%' || line[0] == '*')
+      continue;
+    std::stringstream ss(line);
+    std::vector<double> values;
+    double v = 0.0;
+    while (ss >> v)
+      values.push_back(v);
+    if (values.size() >= 4)
+    {
+      lat = values[1];
+      lon = values[2];
+      h = values[3];
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -234,6 +269,18 @@ int main(int argc, char** argv)
   }
   else if (args.coord == "ned")
   {
+    if (!args.ned_origin_from.empty())
+    {
+      double lat0 = 0.0, lon0 = 0.0, h0 = 0.0;
+      if (!ReadFirstPosLatLonH(args.ned_origin_from, lat0, lon0, h0))
+      {
+        std::cerr << "Failed to read NED origin from pos file." << std::endl;
+        return 1;
+      }
+      std::cout << "Using NED Origin from file: " << args.ned_origin_from << std::endl;
+      std::cout << "  Lat0: " << lat0 << " Lon0: " << lon0 << " H0: " << h0 << std::endl;
+      transformer.SetNedOrigin(lat0, lon0, h0);
+    }
     if (!transformer.LoadWgs84PosAsNED(args.pos_path))
     {
       std::cerr << "Failed to load wgs84 pos." << std::endl;

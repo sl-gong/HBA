@@ -41,6 +41,8 @@ public:
 
   bool LoadGaussPos(const std::string& pos_path, const PosColumns& cols = PosColumns());
   bool LoadWgs84PosAsNED(const std::string& pos_path, const PosColumns& cols = PosColumns());
+  void SetNedOrigin(double lat_deg, double lon_deg, double h);
+  void ClearNedOrigin();
 
   const std::vector<Pose>& poses() const;
 
@@ -80,6 +82,12 @@ private:
   bool poses_ready_ = false;
   mutable size_t last_index_ = 0;
   mutable bool last_index_ready_ = false;
+
+  bool ned_origin_ready_ = false;
+  double ned_lat0_ = 0.0;
+  double ned_lon0_ = 0.0;
+  double ned_h0_ = 0.0;
+  Eigen::Vector3d ned_ecef0_ = Eigen::Vector3d::Zero();
 };
 
 }  // namespace hba
