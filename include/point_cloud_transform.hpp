@@ -2,15 +2,29 @@
 #define POINT_CLOUD_TRANSFORM_HPP
 
 #include <Eigen/Dense>
+
+#define PCL_NO_PRECOMPILE
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/register_point_struct.h>
 
 #include <string>
 #include <vector>
 
 namespace hba {
 
-using PointType = pcl::PointXYZI;
+struct PointXYZID
+{
+  double time = 0.0;
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+  float intensity = 0.0f;
+
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+using PointType = PointXYZID;
 
 struct PosColumns
 {
@@ -18,9 +32,9 @@ struct PosColumns
   int c1 = 1;
   int c2 = 2;
   int c3 = 3;
-  int roll = 4;
+  int yaw = 4;
   int pitch = 5;
-  int yaw = 6;
+  int roll = 6;
 };
 
 struct Pose
@@ -47,24 +61,13 @@ public:
   const std::vector<Pose>& poses() const;
 
   bool TransformCloudByTime(const pcl::PointCloud<PointType>& in,
-                            pcl::PointCloud<PointType>& out,
-                            double time, bool forward = true) const;
-
-  bool TransformCloudByIndex(const pcl::PointCloud<PointType>& in,
-                             pcl::PointCloud<PointType>& out,
-                             size_t index, bool forward = true) const;
-
-  bool TransformCloudByTimes(const pcl::PointCloud<PointType>& in,
-                             const std::vector<double>& times,
                              pcl::PointCloud<PointType>& out,
                              bool forward = true) const;
   
   static double GetGaussCm(double lon_deg);
                            
   bool LoadLasFile(const std::string& las_path, pcl::PointCloud<PointType>& cloud) const;
-  bool LoadLasFile(const std::string& las_path, pcl::PointCloud<PointType>& cloud,
-                   std::vector<double>& times) const;
-
+  
 private:
   Pose LookupPose(double time) const;
   static bool ReadNumericColumns(const std::string& line, std::vector<double>& values);
@@ -94,5 +97,11 @@ private:
 };
 
 }  // namespace hba
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(hba::PointXYZID,
+                                  (double, x, x)
+                                  (double, y, y)
+                                  (double, z, z)
+                                  (float, intensity, intensity))
 
 #endif

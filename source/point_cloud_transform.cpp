@@ -134,8 +134,8 @@ Eigen::Matrix3d PointCloudTransformer::RPYDegToMatrix(double roll_deg,
   double pitch = pitch_deg * M_PI / 180.0;
   double yaw = yaw_deg * M_PI / 180.0;
 
-  Eigen::AngleAxisd Rx(roll, Eigen::Vector3d::UnitX());
-  Eigen::AngleAxisd Ry(pitch, Eigen::Vector3d::UnitY());
+  Eigen::AngleAxisd Rx(pitch, Eigen::Vector3d::UnitX());
+  Eigen::AngleAxisd Ry(roll, Eigen::Vector3d::UnitY());
   Eigen::AngleAxisd Rz(yaw, Eigen::Vector3d::UnitZ());
 
   return (Rz * Ry * Rx).toRotationMatrix();
@@ -422,90 +422,18 @@ Pose PointCloudTransformer::LookupPose(double time) const
 }
 
 bool PointCloudTransformer::TransformCloudByTime(const pcl::PointCloud<PointType>& in,
-                                                 pcl::PointCloud<PointType>& out,
-                                                 double time, bool forward) const
-{
-  if (!poses_ready_ || !extrinsic_ready_)
-    return false;
-
-  Pose pose = LookupPose(time);
-
-  out.points.resize(in.points.size());
-  for (size_t i = 0; i < in.points.size(); ++i)
-  {
-    Eigen::Vector3d p_l(in.points[i].x, in.points[i].y, in.points[i].z);
-    Eigen::Vector3d p_out;
-    if (forward)
-    {
-      Eigen::Vector3d p_b = R_bl_ * p_l + t_bl_;
-      p_out = pose.R_wb * p_b + pose.p;
-    }
-    else
-    {
-      Eigen::Vector3d p_b = pose.R_wb.transpose() * (p_l - pose.p);
-      p_out = R_bl_.transpose() * (p_b - t_bl_);
-    }
-
-    out.points[i].x = static_cast<float>(p_out.x());
-    out.points[i].y = static_cast<float>(p_out.y());
-    out.points[i].z = static_cast<float>(p_out.z());
-    out.points[i].intensity = in.points[i].intensity;
-  }
-  return true;
-}
-
-bool PointCloudTransformer::TransformCloudByIndex(const pcl::PointCloud<PointType>& in,
-                                                  pcl::PointCloud<PointType>& out,
-                                                  size_t index, bool forward) const
-{
-  if (!poses_ready_ || !extrinsic_ready_)
-    return false;
-
-  if (index >= poses_.size())
-    return false;
-
-  const Pose& pose = poses_[index];
-  out.points.resize(in.points.size());
-
-  for (size_t i = 0; i < in.points.size(); ++i)
-  {
-    Eigen::Vector3d p_l(in.points[i].x, in.points[i].y, in.points[i].z);
-    Eigen::Vector3d p_out;
-    if (forward)
-    {
-      Eigen::Vector3d p_b = R_bl_ * p_l + t_bl_;
-      p_out = pose.R_wb * p_b + pose.p;
-    }
-    else
-    {
-      Eigen::Vector3d p_b = pose.R_wb.transpose() * (p_l - pose.p);
-      p_out = R_bl_.transpose() * (p_b - t_bl_);
-    }
-
-    out.points[i].x = static_cast<float>(p_out.x());
-    out.points[i].y = static_cast<float>(p_out.y());
-    out.points[i].z = static_cast<float>(p_out.z());
-    out.points[i].intensity = in.points[i].intensity;
-  }
-  return true;
-}
-
-bool PointCloudTransformer::TransformCloudByTimes(const pcl::PointCloud<PointType>& in,
-                                                  const std::vector<double>& times,
                                                   pcl::PointCloud<PointType>& out,
                                                   bool forward) const
 {
   if (!poses_ready_ || !extrinsic_ready_)
     return false;
 
-  if (in.points.size() != times.size())
-    return false;
-
   out.points.resize(in.points.size());
 
   for (size_t i = 0; i < in.points.size(); ++i)
   {
-    Pose pose = LookupPose(times[i]);
+    const PointType& pt = in.points[i];
+    Pose pose = LookupPose(pt.time);
     Eigen::Vector3d p_l(in.points[i].x, in.points[i].y, in.points[i].z);
     Eigen::Vector3d p_out;
 
@@ -519,10 +447,10 @@ bool PointCloudTransformer::TransformCloudByTimes(const pcl::PointCloud<PointTyp
       Eigen::Vector3d p_b = pose.R_wb.transpose() * (p_l - pose.p);
       p_out = R_bl_.transpose() * (p_b - t_bl_);
     }
-
-    out.points[i].x = static_cast<float>(p_out.x());
-    out.points[i].y = static_cast<float>(p_out.y());
-    out.points[i].z = static_cast<float>(p_out.z());
+    out.points[i] = in.points[i];
+    out.points[i].x = p_out.x();
+    out.points[i].y = p_out.y();
+    out.points[i].z = p_out.z();
   }
   return true;
 }
@@ -560,65 +488,6 @@ bool PointCloudTransformer::LoadLasFile(const std::string& las_path,
   const laszip_U32 count = header->number_of_point_records;
   cloud.points.resize(count);
 
-  for (laszip_U32 i = 0; i < count; ++i)
-  {
-    if (laszip_read_point(reader))
-    {
-      laszip_close_reader(reader);
-      laszip_destroy(reader);
-      return false;
-    }
-
-    double x = header->x_offset + header->x_scale_factor * point->X;
-    double y = header->y_offset + header->y_scale_factor * point->Y;
-    double z = header->z_offset + header->z_scale_factor * point->Z;
-
-    cloud.points[i].x = static_cast<float>(x);
-    cloud.points[i].y = static_cast<float>(y);
-    cloud.points[i].z = static_cast<float>(z);
-    cloud.points[i].intensity = static_cast<float>(point->intensity);
-  }
-
-  laszip_close_reader(reader);
-  laszip_destroy(reader);
-  return true;
-}
-
-bool PointCloudTransformer::LoadLasFile(const std::string& las_path,
-                                        pcl::PointCloud<PointType>& cloud,
-                                        std::vector<double>& times) const
-{
-  laszip_POINTER reader = nullptr;
-  if (laszip_create(&reader))
-    return false;
-
-  laszip_BOOL is_compressed = 1;
-  if (laszip_open_reader(reader, las_path.c_str(), &is_compressed))
-  {
-    laszip_destroy(reader);
-    return false;
-  }
-
-  laszip_header* header = nullptr;
-  if (laszip_get_header_pointer(reader, &header))
-  {
-    laszip_close_reader(reader);
-    laszip_destroy(reader);
-    return false;
-  }
-
-  laszip_point* point = nullptr;
-  if (laszip_get_point_pointer(reader, &point))
-  {
-    laszip_close_reader(reader);
-    laszip_destroy(reader);
-    return false;
-  }
-
-  const laszip_U32 count = header->number_of_point_records;
-  cloud.points.resize(count);
-  times.clear();
-
   const bool has_gps_time = (header->point_data_format == 1 || header->point_data_format == 3 ||
                              header->point_data_format == 4 || header->point_data_format == 5 ||
                              header->point_data_format == 6 || header->point_data_format == 7 ||
@@ -630,7 +499,6 @@ bool PointCloudTransformer::LoadLasFile(const std::string& las_path,
     laszip_destroy(reader);
     return false;
   }
-  times.reserve(count);
 
   for (laszip_U32 i = 0; i < count; ++i)
   {
@@ -645,18 +513,17 @@ bool PointCloudTransformer::LoadLasFile(const std::string& las_path,
     double y = header->y_offset + header->y_scale_factor * point->Y;
     double z = header->z_offset + header->z_scale_factor * point->Z;
 
-    cloud.points[i].x = static_cast<float>(x);
-    cloud.points[i].y = static_cast<float>(y);
-    cloud.points[i].z = static_cast<float>(z);
+    cloud.points[i].x = x;
+    cloud.points[i].y = y;
+    cloud.points[i].z = z;
     cloud.points[i].intensity = static_cast<float>(point->intensity);
-    times.push_back(point->gps_time);
+    cloud.points[i].time = point->gps_time;
   }
 
   laszip_close_reader(reader);
   laszip_destroy(reader);
-  if (!times.empty() && times.size() != cloud.points.size())
-    return false;
   return true;
 }
+
 
 }  // namespace hba

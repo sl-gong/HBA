@@ -120,8 +120,7 @@ bool ParseArgs(int argc, char** argv, Args& args)
   return true;
 }
 
-bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& cloud,
-               const std::vector<double>* times = nullptr)
+bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& cloud)
 {
   if (path.size() >= 4 && path.substr(path.size() - 4) == ".las")
   {
@@ -136,11 +135,10 @@ bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& c
       return false;
     }
 
-    const bool write_time = times && (times->size() == cloud.points.size());
     header->version_major = 1;
     header->version_minor = 2;
-    header->point_data_format = write_time ? 1 : 0;
-    header->point_data_record_length = write_time ? 28 : 20;
+    header->point_data_format =  1;
+    header->point_data_record_length =  28;
     header->number_of_point_records = static_cast<laszip_U32>(cloud.points.size());
 
     header->x_scale_factor = 0.001;
@@ -196,9 +194,8 @@ bool SaveCloud(const std::string& path, const pcl::PointCloud<hba::PointType>& c
       point->Y = static_cast<laszip_I32>((pt.y - header->y_offset) / header->y_scale_factor + 0.5);
       point->Z = static_cast<laszip_I32>((pt.z - header->z_offset) / header->z_scale_factor + 0.5);
       point->intensity = static_cast<laszip_U16>(std::clamp(pt.intensity, 0.0f, 65535.0f));
-      if (write_time)
-        point->gps_time = (*times)[i];
-
+      point->gps_time =  pt.time;
+      
       if (laszip_write_point(writer))
       {
         laszip_close_writer(writer);
@@ -294,21 +291,7 @@ int main(int argc, char** argv)
   }
 
   pcl::PointCloud<hba::PointType> in_cloud;
-  bool loaded = false;
-  std::vector<double> point_times;
-  if (args.in_path.size() >= 4 && args.in_path.substr(args.in_path.size() - 4) == ".pcd")
-  {
-    loaded = (pcl::io::loadPCDFile(args.in_path, in_cloud) >= 0);
-    if (args.use_point_time)
-      loaded = false;
-  }
-  else
-  {
-    if (args.use_point_time)
-      loaded = transformer.LoadLasFile(args.in_path, in_cloud, point_times);
-    else
-      loaded = transformer.LoadLasFile(args.in_path, in_cloud);
-  }
+  bool loaded = loaded = transformer.LoadLasFile(args.in_path, in_cloud);
 
   if (!loaded)
   {
@@ -316,21 +299,10 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  if (args.use_point_time && point_times.size() != in_cloud.points.size())
-  {
-    std::cerr << "Per-point timestamps not available in input LAS." << std::endl;
-    return 1;
-  }
-
   pcl::PointCloud<hba::PointType> out_cloud;
   bool ok = false;
   bool forward = (args.mode == "forward");
-  if (args.use_point_time)
-    ok = transformer.TransformCloudByTimes(in_cloud, point_times, out_cloud, forward);
-  else if (args.use_time)
-    ok = transformer.TransformCloudByTime(in_cloud, out_cloud, args.time, forward);
-  else
-    ok = transformer.TransformCloudByIndex(in_cloud, out_cloud, args.index, forward);
+  ok = transformer.TransformCloudByTime(in_cloud, out_cloud, forward);
 
   if (!ok)
   {
@@ -338,7 +310,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  if (!SaveCloud(args.out_path, out_cloud, args.use_point_time ? &point_times : nullptr))
+  if (!SaveCloud(args.out_path, out_cloud))
   {
     std::cerr << "Failed to save output." << std::endl;
     return 1;
