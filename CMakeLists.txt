@@ -20,6 +20,15 @@ set(EIGEN3_INCLUDE_DIR /Users/gsl/work/slam/gtsam/gtsam/3rdparty/Eigen)
 include_directories(${EIGEN3_INCLUDE_DIR})
 find_package(GTSAM REQUIRED QUIET)
 
+find_path(GEOGRAPHICLIB_INCLUDE_DIR GeographicLib/Geocentric.hpp PATHS /opt/homebrew/include /usr/local/include)
+find_library(GEOGRAPHICLIB_LIBRARY GeographicLib PATHS /opt/homebrew/lib /usr/local/lib)
+if(NOT GEOGRAPHICLIB_LIBRARY)
+  find_library(GEOGRAPHICLIB_LIBRARY Geographic PATHS /opt/homebrew/lib /usr/local/lib)
+endif()
+if(NOT GEOGRAPHICLIB_INCLUDE_DIR OR NOT GEOGRAPHICLIB_LIBRARY)
+  message(FATAL_ERROR "GeographicLib not found. Please install GeographicLib (brew install geographiclib).")
+endif()
+
 find_path(LASZIP_INCLUDE_DIR laszip/laszip_api.h PATHS /opt/homebrew/include /usr/local/include)
 find_library(LASZIP_LIBRARY laszip PATHS /opt/homebrew/lib /usr/local/lib)
 if(NOT LASZIP_INCLUDE_DIR OR NOT LASZIP_LIBRARY)
@@ -42,6 +51,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
   ${GTSAM_INCLUDE_DIR}
   ${LASZIP_INCLUDE_DIR}
+  ${GEOGRAPHICLIB_INCLUDE_DIR}
 )
 
 # Hierarchical Bundle Adjustment
@@ -52,14 +62,14 @@ add_executable(hba
 # 强制设置 Eigen 版本信息，以匹配 GTSAM 的要求（Eigen 3.3.7）
 target_compile_definitions(hba PRIVATE EIGEN_WORLD_VERSION=3 EIGEN_MAJOR_VERSION=3 EIGEN_MINOR_VERSION=7)
 # 链接 TBB 库
-target_link_libraries(hba ${PCL_LIBRARIES} gtsam ${LASZIP_LIBRARY} /opt/homebrew/lib/libtbb.dylib /opt/homebrew/lib/libtbbmalloc.dylib)
+target_link_libraries(hba ${PCL_LIBRARIES} gtsam ${LASZIP_LIBRARY} ${GEOGRAPHICLIB_LIBRARY} /opt/homebrew/lib/libtbb.dylib /opt/homebrew/lib/libtbbmalloc.dylib)
 
 # Point cloud transform test tool
 add_executable(pcd_resolve
   source/point_cloud_transform_main.cpp
   source/point_cloud_transform.cpp
 )
-target_link_libraries(pcd_resolve ${PCL_LIBRARIES} ${LASZIP_LIBRARY})
+target_link_libraries(pcd_resolve ${PCL_LIBRARIES} ${LASZIP_LIBRARY} ${GEOGRAPHICLIB_LIBRARY})
 
 # Remove visualize_map since it depends on ROS for visualization
 # add_executable(visualize_map source/visualize.cpp)

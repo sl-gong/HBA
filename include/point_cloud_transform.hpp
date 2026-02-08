@@ -58,7 +58,9 @@ public:
                              const std::vector<double>& times,
                              pcl::PointCloud<PointType>& out,
                              bool forward = true) const;
-
+  
+  static double GetGaussCm(double lon_deg);
+                           
   bool LoadLasFile(const std::string& las_path, pcl::PointCloud<PointType>& cloud) const;
   bool LoadLasFile(const std::string& las_path, pcl::PointCloud<PointType>& cloud,
                    std::vector<double>& times) const;
@@ -73,6 +75,7 @@ private:
                                    const Eigen::Vector3d& ecef0,
                                    double lat0_deg, double lon0_deg);
   static Eigen::Vector2d Wgs84ToGauss3(double lat_deg, double lon_deg, double& cm_deg);
+  static Eigen::Vector2d Wgs84ToGauss3WithCm(double lat_deg, double lon_deg, double cm_deg);
 
   Eigen::Matrix3d R_bl_ = Eigen::Matrix3d::Identity();
   Eigen::Vector3d t_bl_ = Eigen::Vector3d::Zero();

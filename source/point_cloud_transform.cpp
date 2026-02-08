@@ -9,6 +9,11 @@
 #include <regex>
 #include <sstream>
 
+#include <GeographicLib/Geocentric.hpp>
+#include <GeographicLib/Constants.hpp>
+#include <GeographicLib/LocalCartesian.hpp>
+#include <GeographicLib/TransverseMercator.hpp>
+
 namespace hba {
 
 PointCloudTransformer::PointCloudTransformer() = default;
@@ -91,15 +96,15 @@ void PointCloudTransformer::SetExtrinsic(const Eigen::Vector3d& t_bl,
 {
   if (lidar_in_body)
   {
+    R_bl_ = R_bl;
+    t_bl_ = t_bl;
+  }
+  else
+  {
     Eigen::Matrix3d R_lb = R_bl;
     Eigen::Vector3d t_lb = t_bl;
     R_bl_ = R_lb.transpose();
     t_bl_ = -R_lb.transpose() * t_lb;
-  }
-  else
-  {
-    R_bl_ = R_bl;
-    t_bl_ = t_bl;
   }
 
   extrinsic_ready_ = true;
@@ -140,24 +145,9 @@ Eigen::Vector3d PointCloudTransformer::Wgs84ToEcef(double lat_deg,
                                                    double lon_deg,
                                                    double h)
 {
-  const double a = 6378137.0;
-  const double f = 1.0 / 298.257223563;
-  const double e2 = 2 * f - f * f;
-
-  double lat = lat_deg * M_PI / 180.0;
-  double lon = lon_deg * M_PI / 180.0;
-
-  double sin_lat = std::sin(lat);
-  double cos_lat = std::cos(lat);
-  double sin_lon = std::sin(lon);
-  double cos_lon = std::cos(lon);
-
-  double N = a / std::sqrt(1.0 - e2 * sin_lat * sin_lat);
-
-  double x = (N + h) * cos_lat * cos_lon;
-  double y = (N + h) * cos_lat * sin_lon;
-  double z = (N * (1.0 - e2) + h) * sin_lat;
-
+  const auto& geocentric = GeographicLib::Geocentric::WGS84();
+  double x = 0.0, y = 0.0, z = 0.0;
+  geocentric.Forward(lat_deg, lon_deg, h, x, y, z);
   return Eigen::Vector3d(x, y, z);
 }
 
@@ -165,63 +155,45 @@ Eigen::Vector3d PointCloudTransformer::EcefToNed(const Eigen::Vector3d& ecef,
                                                  const Eigen::Vector3d& ecef0,
                                                  double lat0_deg, double lon0_deg)
 {
-  double lat0 = lat0_deg * M_PI / 180.0;
-  double lon0 = lon0_deg * M_PI / 180.0;
+  const auto& geocentric = GeographicLib::Geocentric::WGS84();
+  double lat = 0.0, lon = 0.0, h = 0.0;
+  geocentric.Reverse(ecef.x(), ecef.y(), ecef.z(), lat, lon, h);
 
-  double sin_lat = std::sin(lat0);
-  double cos_lat = std::cos(lat0);
-  double sin_lon = std::sin(lon0);
-  double cos_lon = std::cos(lon0);
+  double lat0 = 0.0, lon0 = 0.0, h0 = 0.0;
+  geocentric.Reverse(ecef0.x(), ecef0.y(), ecef0.z(), lat0, lon0, h0);
 
-  Eigen::Matrix3d R;
-  R << -sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat,
-       -sin_lon,            cos_lon,           0.0,
-       -cos_lat * cos_lon, -cos_lat * sin_lon, -sin_lat;
+  GeographicLib::LocalCartesian local(lat0, lon0, h0, geocentric);
+  double x_e = 0.0, y_n = 0.0, z_u = 0.0;
+  local.Forward(lat, lon, h, x_e, y_n, z_u);
+  return Eigen::Vector3d(y_n, x_e, -z_u);
+}
 
-  return R * (ecef - ecef0);
+double PointCloudTransformer::GetGaussCm(double lon_deg)
+{
+  int zone = static_cast<int>((lon_deg + 1.5) / 3.0);
+  return zone * 3.0;
 }
 
 Eigen::Vector2d PointCloudTransformer::Wgs84ToGauss3(double lat_deg,
                                                      double lon_deg,
                                                      double& cm_deg)
 {
-  const double a = 6378137.0;
-  const double f = 1.0 / 298.257223563;
-  const double e2 = 2 * f - f * f;
-  const double ep2 = e2 / (1.0 - e2);
+  cm_deg = GetGaussCm(lon_deg);
+  return Wgs84ToGauss3WithCm(lat_deg, lon_deg, cm_deg);
+}
 
-  int zone = static_cast<int>((lon_deg + 1.5) / 3.0);
-  cm_deg = zone * 3.0;
+Eigen::Vector2d PointCloudTransformer::Wgs84ToGauss3WithCm(double lat_deg,
+                                                           double lon_deg,
+                                                           double cm_deg)
+{
+  GeographicLib::TransverseMercator tm(GeographicLib::Constants::WGS84_a(),
+                                       GeographicLib::Constants::WGS84_f(),
+                                       1.0);
+  double x = 0.0, y = 0.0, gamma = 0.0, k = 0.0;
+  tm.Forward(cm_deg, lat_deg, lon_deg, x, y, gamma, k);
 
-  double lat = lat_deg * M_PI / 180.0;
-  double lon = lon_deg * M_PI / 180.0;
-  double lon0 = cm_deg * M_PI / 180.0;
-
-  double sin_lat = std::sin(lat);
-  double cos_lat = std::cos(lat);
-  double t = std::tan(lat);
-  double eta2 = ep2 * cos_lat * cos_lat;
-  double A = lon - lon0;
-
-  double m = a * ((1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 * e2 * e2 / 256) * lat
-                - (3 * e2 / 8 + 3 * e2 * e2 / 32 + 45 * e2 * e2 * e2 / 1024) * std::sin(2 * lat)
-                + (15 * e2 * e2 / 256 + 45 * e2 * e2 * e2 / 1024) * std::sin(4 * lat)
-                - (35 * e2 * e2 * e2 / 3072) * std::sin(6 * lat));
-
-  double N = a / std::sqrt(1 - e2 * sin_lat * sin_lat);
-
-  double x = m + N * t * (A * A / 2
-                         + (5 - t * t + 9 * eta2 + 4 * eta2 * eta2) * std::pow(A, 4) / 24
-                         + (61 - 58 * t * t + t * t * t * t) * std::pow(A, 6) / 720);
-
-  double y = N * (A * cos_lat
-                + (1 - t * t + eta2) * std::pow(A, 3) * std::pow(cos_lat, 3) / 6
-                + (5 - 18 * t * t + t * t * t * t + 14 * eta2 - 58 * t * t * eta2)
-                  * std::pow(A, 5) * std::pow(cos_lat, 5) / 120);
-
-  double easting = 500000.0 + y;
-  double northing = x;
-
+  double easting = 500000.0 + x;
+  double northing = y;
   return Eigen::Vector2d(easting, northing);
 }
 
@@ -235,6 +207,10 @@ bool PointCloudTransformer::LoadGaussPos(const std::string& pos_path,
   poses_.clear();
   std::string line;
   std::vector<double> values;
+  bool format_decided = false;
+  bool input_is_wgs84 = false;
+  bool cm_ready = false;
+  double cm_deg = 0.0;
 
   while (std::getline(file, line))
   {
@@ -245,16 +221,40 @@ bool PointCloudTransformer::LoadGaussPos(const std::string& pos_path,
                                                      cols.roll, cols.pitch, cols.yaw}))
       continue;
 
-    double lat = values[cols.c1];
-    double lon = values[cols.c2];
-    double h = values[cols.c3];
-
-    double cm = 0.0;
-    Eigen::Vector2d gauss = Wgs84ToGauss3(lat, lon, cm);
+    if (!format_decided)
+    {
+      double v1 = values[cols.c1];
+      double v2 = values[cols.c2];
+      input_is_wgs84 = (std::abs(v1) <= 90.0 && std::abs(v2) <= 180.0);
+      format_decided = true;
+      if (input_is_wgs84)
+      {
+        int zone = static_cast<int>((v2 + 1.5) / 3.0);
+        cm_deg = zone * 3.0;
+        cm_ready = true;
+      }
+    }
 
     Pose p;
     p.t = values[cols.time];
-    p.p = Eigen::Vector3d(gauss.x(), gauss.y(), h);
+    if (input_is_wgs84)
+    {
+      double lat = values[cols.c1];
+      double lon = values[cols.c2];
+      double h = values[cols.c3];
+      if (!cm_ready)
+      {
+        int zone = static_cast<int>((lon + 1.5) / 3.0);
+        cm_deg = zone * 3.0;
+        cm_ready = true;
+      }
+      Eigen::Vector2d gauss = Wgs84ToGauss3WithCm(lat, lon, cm_deg);
+      p.p = Eigen::Vector3d(gauss.x(), gauss.y(), h);
+    }
+    else
+    {
+      p.p = Eigen::Vector3d(values[cols.c1], values[cols.c2], values[cols.c3]);
+    }
     p.R_wb = RPYDegToMatrix(values[cols.roll], values[cols.pitch], values[cols.yaw]);
     poses_.push_back(p);
   }
@@ -277,7 +277,8 @@ bool PointCloudTransformer::LoadWgs84PosAsNED(const std::string& pos_path,
   double lat0 = ned_lat0_;
   double lon0 = ned_lon0_;
   double h0 = ned_h0_;
-  Eigen::Vector3d ecef0 = ned_ecef0_;
+  GeographicLib::LocalCartesian local;
+  bool local_ready = false;
 
   while (std::getline(file, line))
   {
@@ -298,17 +299,23 @@ bool PointCloudTransformer::LoadWgs84PosAsNED(const std::string& pos_path,
       lat0 = lat;
       lon0 = lon;
       h0 = h;
-      ecef0 = Wgs84ToEcef(lat0, lon0, h0);
       origin_set = true;
       ned_origin_ready_ = true;
       ned_lat0_ = lat0;
       ned_lon0_ = lon0;
       ned_h0_ = h0;
-      ned_ecef0_ = ecef0;
     }
 
-    Eigen::Vector3d ecef = Wgs84ToEcef(lat, lon, h);
-    Eigen::Vector3d ned = EcefToNed(ecef, ecef0, lat0, lon0);
+    if (!local_ready)
+    {
+      local = GeographicLib::LocalCartesian(lat0, lon0, h0,
+                                            GeographicLib::Geocentric::WGS84());
+      local_ready = true;
+    }
+
+    double x_e = 0.0, y_n = 0.0, z_u = 0.0;
+    local.Forward(lat, lon, h, x_e, y_n, z_u);
+    Eigen::Vector3d ned(y_n, x_e, -z_u);
 
     Pose p;
     p.t = t;
