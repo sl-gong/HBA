@@ -1,4 +1,4 @@
-#include "point_cloud_transform.hpp"
+#include "../include/point_cloud_transform.hpp"
 
 #include <laszip/laszip_api.h>
 
@@ -345,6 +345,14 @@ void PointCloudTransformer::ClearNedOrigin()
 const std::vector<Pose>& PointCloudTransformer::poses() const
 {
   return poses_;
+}
+
+void PointCloudTransformer::SetPoses(const std::vector<Pose>& poses)
+{
+  poses_ = poses;
+  poses_ready_ = !poses_.empty();
+  last_index_ = 0;
+  last_index_ready_ = false;
 }
 
 Pose PointCloudTransformer::LookupPose(double time) const

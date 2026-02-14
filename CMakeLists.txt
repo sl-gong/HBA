@@ -81,3 +81,8 @@ target_link_libraries(pcd_resolve ${PCL_LIBRARIES} ${LASZIP_LIBRARY} ${GEOGRAPHI
 add_executable(las_info source/las_info.cpp)
 target_link_libraries(las_info ${LASZIP_LIBRARY})
 target_include_directories(las_info PRIVATE ${LASZIP_INCLUDE_DIR})
+
+# Multi-strip LiDAR processor
+add_executable(multi_strip_processor multi_strip_processor.cpp source/point_cloud_transform.cpp)
+target_compile_definitions(multi_strip_processor PRIVATE EIGEN_WORLD_VERSION=3 EIGEN_MAJOR_VERSION=3 EIGEN_MINOR_VERSION=7)
+target_link_libraries(multi_strip_processor ${PCL_LIBRARIES} gtsam ${LASZIP_LIBRARY} ${GEOGRAPHICLIB_LIBRARY})

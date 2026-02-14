@@ -59,6 +59,7 @@ public:
   void ClearNedOrigin();
 
   const std::vector<Pose>& poses() const;
+  void SetPoses(const std::vector<Pose>& poses);
 
   bool TransformCloudByTime(const pcl::PointCloud<PointType>& in,
                              pcl::PointCloud<PointType>& out,
